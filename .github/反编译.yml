@@ -1,0 +1,36 @@
+name: Reasily Zip Pack
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'microsoft'
+
+      - name: Decompile and Zip
+        run: |
+          # 1. 下载工具
+          wget https://github.com/skylot/jadx/releases/download/v1.4.7/jadx-1.4.7.zip
+          unzip jadx-1.4.7.zip -d jadx_bin
+          
+          # 2. 合并反编译：确保包含主包和 arm64 分包以获取完整资源
+          ./jadx_bin/bin/jadx --deobf -d reasily_source --export-gradle com.gmail.jxlab.app.reasily.apk config.arm64_v8a.apk
+          
+          # 3. 直接打包成 ZIP
+          zip -r reasily_source_code.zip reasily_source
+
+      - name: Upload Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: reasily-source-zip
+          path: reasily_source_code.zip
