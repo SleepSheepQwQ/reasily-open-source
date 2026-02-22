@@ -30,7 +30,6 @@ permissions:
 defaults:
   run:
     shell: bash
-    working-directory: "${{ github.workspace }}"
 
 jobs:
   sync-dependencies:
@@ -51,17 +50,15 @@ jobs:
 
           echo "==================== 环境预校验开始 ===================="
           
-          # 检查所有必要工具
           REQUIRED_TOOLS=("wget" "curl" "sha256sum" "git" "mkdir" "rm" "mv" "ls" "stat" "awk" "xargs" "basename" "dirname")
           for TOOL in "${REQUIRED_TOOLS[@]}"; do
             if ! command -v "$TOOL" &> /dev/null; then
-              echo "❌ 错误：缺少必要工具 $TOOL，环境不满足执行要求"
+              echo "❌ 错误：缺少必要工具 $TOOL"
               exit 1
             fi
             echo "✅ 工具检查通过：$TOOL"
           done
 
-          # 自动创建项目核心目录，兼容空仓库
           CORE_DIRS=(
             "epub-reader-light/assets/css"
             "epub-reader-light/assets/js"
@@ -76,16 +73,13 @@ jobs:
             echo "✅ 目录检查通过：$DIR"
           done
 
-          # Git环境标准化配置，避免换行符/编码问题
           git config --global core.autocrlf false
           git config --global core.fileMode false
           git config --global core.quotepath off
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 同步最新主分支代码，避免基于旧版本执行
           git pull origin main --rebase
-
           echo "==================== 环境预校验全部通过 ===================="
 
       - name: Load dependency configuration
@@ -94,17 +88,12 @@ jobs:
           set -euo pipefail
           IFS=$'\n\t'
 
-          # 依赖配置核心区，新增/修改仅需编辑此处
-          # 格式：名称|版本|下载直链|目标文件路径|SHA256哈希值
-          cat > .deps_list << 'EOF'
-          epub.js|0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|epub-reader-light/assets/js/epub.min.js|f09d7e8a99b693a71c0b1a2d4586f9c2b3d78e9f0a1b2c3d4e5f6a7b8c9d0e1
-          EOF
+          cat > .deps_list << 'DEPS_EOF'
+          epub.js|0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|epub-reader-light/assets/js/epub.min.js|a97e536037a703a074f0a4d0e4c0d9b8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d
+          DEPS_EOF
 
-          # 过滤注释和空行，生成有效配置
           grep -v '^#' .deps_list | grep -v '^$' > .valid_deps
-          DEP_COUNT=$(wc -l < .valid_deps)
-          echo "✅ 加载有效依赖配置：$DEP_COUNT 个"
-          echo "dep_count=$DEP_COUNT" >> "$GITHUB_OUTPUT"
+          echo "dep_count=$(wc -l < .valid_deps)" >> "$GITHUB_OUTPUT"
 
       - name: Download and verify dependencies
         id: download-deps
@@ -113,11 +102,9 @@ jobs:
           IFS=$'\n\t'
 
           echo "==================== 依赖拉取开始 ===================="
-          # 临时工作目录，所有下载先放此处，校验通过才写入正式路径
           TMP_DIR="./.tmp_deps_download"
           mkdir -p "$TMP_DIR"
           
-          # 变更日志文件，用于PR内容
           CHANGE_LOG="./.change_log.md"
           echo "# Dependency Sync Change Log" > "$CHANGE_LOG"
           echo "Run time: $(date '+%Y-%m-%d %H:%M:%S')" >> "$CHANGE_LOG"
@@ -126,13 +113,10 @@ jobs:
           echo "| Name | Version | Change Type | Target Path | Status |" >> "$CHANGE_LOG"
           echo "| ---- | ------- | ----------- | ----------- | ------ |" >> "$CHANGE_LOG"
 
-          # 全局变更标记
           HAS_CHANGE=false
           FORCE_UPDATE="${{ inputs.force_update || 'false' }}"
 
-          # 循环处理每个依赖
           while IFS='|' read -r NAME VERSION URL TARGET_PATH EXPECTED_SHA; do
-            # 去除字段首尾空格
             NAME=$(echo "$NAME" | xargs)
             VERSION=$(echo "$VERSION" | xargs)
             URL=$(echo "$URL" | xargs)
@@ -142,116 +126,87 @@ jobs:
             echo ""
             echo "==================== 处理依赖：$NAME v$VERSION ===================="
 
-            # 自动创建目标目录
             TARGET_DIR=$(dirname "$TARGET_PATH")
             mkdir -p "$TARGET_DIR"
 
-            # 幂等性校验：已存在且哈希匹配、非强制更新则直接跳过
             CURRENT_SHA=""
             if [ -f "$TARGET_PATH" ]; then
               CURRENT_SHA=$(sha256sum "$TARGET_PATH" | awk '{print $1}')
               if [ "$CURRENT_SHA" == "$EXPECTED_SHA" ] && [ "$FORCE_UPDATE" != "true" ]; then
-                echo "✅ 文件已存在且哈希匹配，跳过处理：$TARGET_PATH"
+                echo "✅ 文件已存在且哈希匹配，跳过处理"
                 echo "| $NAME | $VERSION | No Change | $TARGET_PATH | Pass |" >> "$CHANGE_LOG"
                 continue
               fi
             fi
 
-            # 下载文件（失败自动重试3次，超时10秒）
             TMP_FILE="$TMP_DIR/$(basename "$TARGET_PATH")"
             echo "📥 开始下载：$URL"
             if ! wget --tries=3 --wait=5 --timeout=10 -O "$TMP_FILE" "$URL"; then
-              echo "❌ 下载失败：$NAME v$VERSION，网络异常或地址无效"
+              echo "❌ 下载失败：$NAME v$VERSION"
               exit 1
             fi
 
-            # 文件大小校验：避免下载到404页面、空文件
             FILE_SIZE=$(stat -c%s "$TMP_FILE")
             if [ "$FILE_SIZE" -lt 1024 ]; then
-              echo "❌ 文件异常：$NAME v$VERSION，文件大小仅 $FILE_SIZE 字节，小于1KB最小阈值"
+              echo "❌ 文件异常，大小不足1KB"
               exit 1
             fi
 
-            # SHA256哈希强校验：防止文件篡改、损坏、版本不匹配
             ACTUAL_SHA=$(sha256sum "$TMP_FILE" | awk '{print $1}')
             if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-              echo "❌ 哈希校验失败：$NAME v$VERSION"
-              echo "   期望哈希：$EXPECTED_SHA"
-              echo "   实际哈希：$ACTUAL_SHA"
-              echo "   请检查下载地址是否正确，或更新配置中的哈希值"
+              echo "❌ 哈希校验失败"
+              echo "期望：$EXPECTED_SHA"
+              echo "实际：$ACTUAL_SHA"
               exit 1
             fi
 
-            # 预校验模式：不写入正式路径，仅输出结果
             if [ "${{ inputs.dry_run }}" != "true" ]; then
               mv -f "$TMP_FILE" "$TARGET_PATH"
-              echo "✅ 依赖处理完成：$NAME v$VERSION -> $TARGET_PATH"
+              echo "✅ 依赖处理完成"
             else
-              echo "✅ 预校验通过，文件未写入（dry run模式）：$NAME v$VERSION"
+              echo "✅ 预校验通过，dry run模式不写入文件"
             fi
 
-            # 记录变更
-            if [ -z "${CURRENT_SHA:-}" ]; then
-              CHANGE_TYPE="New"
-            else
-              CHANGE_TYPE="Update"
-            fi
+            CHANGE_TYPE=$([ -z "$CURRENT_SHA" ] && echo "New" || echo "Update")
             echo "| $NAME | $VERSION | $CHANGE_TYPE | $TARGET_PATH | Pass |" >> "$CHANGE_LOG"
             HAS_CHANGE=true
 
           done < .valid_deps
 
-          # 输出结果到环境变量，供后续步骤使用
           echo "has_change=$HAS_CHANGE" >> "$GITHUB_OUTPUT"
           echo "change_log_path=$CHANGE_LOG" >> "$GITHUB_OUTPUT"
           echo "tmp_dir=$TMP_DIR" >> "$GITHUB_OUTPUT"
-
-          echo ""
-          echo "==================== 依赖拉取全部完成 ===================="
-          if [ "$HAS_CHANGE" == "true" ]; then
-            echo "ℹ️  本次执行有变更，详情见变更报告"
-            cat "$CHANGE_LOG"
-          else
-            echo "ℹ️  本次执行无任何变更，所有依赖均已为最新正确版本"
-          fi
 
       - name: Dry run result output
         if: inputs.dry_run == true
         run: |
           set -euo pipefail
-          echo "==================== 预校验预览执行完成 ===================="
-          echo "✅ 所有依赖校验通过，无执行错误"
-          echo "ℹ️  本次为预校验预览模式，未对仓库进行任何修改"
-          echo "ℹ️  如需正式执行，请关闭「dry_run」选项重新触发"
+          echo "==================== 预校验执行完成 ===================="
+          echo "✅ 所有依赖校验通过，无错误"
+          echo "ℹ️  本次为预校验模式，未修改仓库"
           echo ""
-          echo "===== 变更预览 ====="
           cat "${{ steps.download-deps.outputs.change_log_path }}"
 
-      - name: Create temporary change branch
+      - name: Create change branch
         if: inputs.dry_run == false && steps.download-deps.outputs.has_change == 'true'
         id: create-branch
         run: |
           set -euo pipefail
-          # 生成唯一分支名，带时间戳避免冲突
           BRANCH_NAME="auto-update-deps/$(date '+%Y%m%d-%H%M%S')"
           echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
           
-          # 创建并切换到临时分支
           git checkout -b "$BRANCH_NAME"
-          # 添加变更文件
           git add epub-reader-light/assets/
-          # 提交变更
-          git commit -m "chore: auto update open source dependencies [$(date '+%Y-%m-%d %H:%M')]"
-          echo "✅ 变更已提交到临时分支：$BRANCH_NAME"
+          git commit -m "chore: auto update dependencies [$(date '+%Y-%m-%d %H:%M')]"
 
-      - name: Create pull request for review
+      - name: Create pull request
         if: inputs.dry_run == false && inputs.create_pr == true && steps.download-deps.outputs.has_change == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
           branch: "${{ steps.create-branch.outputs.branch_name }}"
           base: main
-          title: "chore: auto update open source dependencies [$(date '+%Y-%m-%d')]"
+          title: "chore: auto update dependencies [$(date '+%Y-%m-%d')]"
           body-path: "${{ steps.download-deps.outputs.change_log_path }}"
           labels: |
             dependencies
@@ -264,20 +219,18 @@ jobs:
           rm -rf .tmp_* .deps_list .valid_deps .change_log.md ./.tmp_deps_download
           echo "✅ 临时文件清理完成"
 
-      - name: Final execution result summary
+      - name: Final result summary
         run: |
-          echo "==================== 工作流执行完成 ===================="
+          echo "==================== 执行完成 ===================="
           if [ "${{ inputs.dry_run }}" == "true" ]; then
-            echo "✅ 预校验模式执行成功，无错误"
+            echo "✅ 预校验模式执行成功"
           else
             if [ "${{ steps.download-deps.outputs.has_change }}" == "true" ]; then
               echo "✅ 正式模式执行成功"
               if [ "${{ inputs.create_pr }}" == "true" ]; then
-                echo "✅ PR已创建，请前往仓库审核合并"
-              else
-                echo "✅ 变更已提交到临时分支，未创建PR"
+                echo "✅ PR已创建，请审核合并"
               fi
             else
-              echo "✅ 执行成功，无依赖变更需要处理"
+              echo "✅ 执行成功，无依赖变更"
             fi
           fi
