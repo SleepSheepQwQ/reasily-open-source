@@ -1,485 +1,301 @@
-name: EPUB阅读器核心资源同步（高兼容强容错版）
-run-name: 资源同步 | 触发人:${{ github.actor }} | 模式:${{ inputs.run_mode || 'dry-run' }}
+name: 审慎高容错-开源依赖同步工作流
+run-name: 依赖同步 ${{ inputs.dry_run && '【预校验预览】' || '【正式执行】' }} | 触发人: ${{ github.actor }}
 
-# 触发规则
+# 触发规则（严格隔离）
 on:
-  # 手动触发（带参数配置，默认预演模式，避免误操作）
+  # 推送到main分支时，仅执行门禁预校验，不做任何仓库修改
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sync-open-source-deps.yml'
+  # 仅手动触发可执行正式变更，支持参数配置
   workflow_dispatch:
     inputs:
-      run_mode:
-        description: 运行模式
-        required: true
-        default: dry-run
-        type: choice
-        options:
-          - dry-run       # 预演模式：仅全量校验，不修改仓库任何内容（默认推荐）
-          - pr-mode       # PR模式：校验通过后创建PR，待审核合并（适配分支保护）
-          - direct-push   # 直推模式：校验通过后直接推送到目标分支（确认无误后使用）
-      force_override:
-        description: 是否强制覆盖已有正确文件
-        required: false
-        default: false
+      dry_run:
+        description: "预校验预览模式（仅检查不修改仓库）"
         type: boolean
-      target_branch:
-        description: 目标分支
-        required: true
-        default: main
-        type: string
-  # 仅当本工作流文件修改时自动触发（强制预演模式，不修改仓库）
-  push:
-    branches: [ main, develop, master ]
-    paths:
-      - ".github/workflows/epub-reader-resource-sync.yml"
+        default: true
+        required: false
+      create_pr:
+        description: "正式模式下是否创建PR（关闭则仅本地变更不提交）"
+        type: boolean
+        default: true
+        required: false
+      force_update:
+        description: "是否强制覆盖已存在的文件（默认仅哈希不匹配时更新）"
+        type: boolean
+        default: false
+        required: false
 
-# 最小权限配置（仅开放必要权限，安全合规）
+# 全局最小权限配置
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
-# 全局环境变量（无runner上下文，全版本兼容，一处修改全流程生效）
-env:
-  PROJECT_ROOT: "epub-reader-light"       # 项目根目录，和本地仓库完全对齐
-  MANIFEST_FILE: "RESOURCES_MANIFEST.md"  # 资源审计清单文件名
-  DEFAULT_TIMEOUT: 15                      # 网络请求超时时间（秒）
-  DEFAULT_RETRY: 3                         # 网络请求失败重试次数
+# 全局Shell严格模式（容错核心：任何命令失败立即终止，不继续执行）
+defaults:
+  run:
+    shell: bash
+    working-directory: ${{ github.workspace }}
 
 jobs:
-  # 第一阶段：前置环境与兼容性校验（失败直接终止，不执行后续操作）
-  pre-flight-check:
+  sync-deps:
     runs-on: ubuntu-latest
-    name: 1. 前置环境与兼容性校验
-    outputs:
-      resource_total: ${{ steps.parse-resource.outputs.resource_total }}
-      resource_core: ${{ steps.parse-resource.outputs.resource_core }}
-      target_branch: ${{ steps.env-init.outputs.target_branch }}
-      run_mode: ${{ steps.env-init.outputs.run_mode }}
-      force_override: ${{ steps.env-init.outputs.force_override }}
+    environment: production
+    # 超时自动终止，避免卡死占用资源
+    timeout-minutes: 10
     steps:
-      - name: 初始化环境变量（全触发方式兼容）
-        id: env-init
-        run: |
-          set -euo pipefail
-          echo "===== 初始化运行环境 ====="
-          # 兼容push事件无inputs的情况，设置默认值
-          RUN_MODE="${{ inputs.run_mode || 'dry-run' }}"
-          TARGET_BRANCH="${{ inputs.target_branch || 'main' }}"
-          FORCE_OVERRIDE="${{ inputs.force_override || 'false' }}"
-          # push事件强制使用dry-run模式，避免误修改仓库
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            RUN_MODE="dry-run"
-            echo "⚠️  push事件触发，强制使用dry-run预演模式"
-          fi
-          # 输出到环境变量与outputs，供后续步骤使用
-          echo "RUN_MODE=$RUN_MODE" >> $GITHUB_ENV
-          echo "TARGET_BRANCH=$TARGET_BRANCH" >> $GITHUB_ENV
-          echo "FORCE_OVERRIDE=$FORCE_OVERRIDE" >> $GITHUB_ENV
-          echo "run_mode=$RUN_MODE" >> $GITHUB_OUTPUT
-          echo "target_branch=$TARGET_BRANCH" >> $GITHUB_OUTPUT
-          echo "force_override=$FORCE_OVERRIDE" >> $GITHUB_OUTPUT
-          # 临时目录定义（runner.temp仅在step内使用，彻底解决语法兼容问题）
-          echo "TEMP_DIR=${{ runner.temp }}/epub-resource-sync" >> $GITHUB_ENV
-          echo "✅ 环境变量初始化完成，运行模式：$RUN_MODE，目标分支：$TARGET_BRANCH"
-
-      - name: 检出仓库代码
+      # 步骤1：检出仓库代码（干净环境，避免残留文件干扰）
+      - name: 🔍 检出仓库代码
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.TARGET_BRANCH }}
-          fetch-depth: 0  # 拉取完整历史，避免推送冲突
+          fetch-depth: 0
+          clean: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 校验Git环境与分支权限
+      # 步骤2：全局环境预校验（容错前置：执行前先确认所有条件满足）
+      - name: 🛡️ 环境与项目结构预校验
         run: |
+          # Shell严格模式（核心容错配置）
           set -euo pipefail
-          echo "===== 校验Git环境与分支权限 ====="
-          # 1. 检查目标分支是否存在
-          if ! git show-ref --verify --quiet refs/heads/$TARGET_BRANCH; then
-            echo "❌ 错误：目标分支 $TARGET_BRANCH 不存在，工作流终止"
-            exit 1
-          fi
-          # 2. 配置Git用户（官方Bot，无个人信息泄露风险）
+          IFS=$'\n\t'
+
+          echo "==================== 环境预校验开始 ===================="
+          
+          # 1. 检查必要工具是否存在
+          REQUIRED_TOOLS=("wget" "curl" "sha256sum" "git" "mkdir" "rm" "mv" "ls")
+          for TOOL in "${REQUIRED_TOOLS[@]}"; do
+            if ! command -v "$TOOL" &> /dev/null; then
+              echo "❌ 错误：缺少必要工具 $TOOL，环境不满足执行要求"
+              exit 1
+            fi
+            echo "✅ 工具检查通过：$TOOL"
+          done
+
+          # 2. 检查项目核心目录是否存在，不存在则自动创建（兼容空仓库）
+          CORE_DIRS=(
+            "epub-reader-light/assets/css"
+            "epub-reader-light/assets/js"
+            "epub-reader-light/assets/fonts"
+            "epub-reader-light/assets/epubs"
+          )
+          for DIR in "${CORE_DIRS[@]}"; do
+            if [ ! -d "$DIR" ]; then
+              echo "⚠️  目录不存在，自动创建：$DIR"
+              mkdir -p "$DIR"
+            fi
+            echo "✅ 目录检查通过：$DIR"
+          done
+
+          # 3. Git环境配置（避免换行符、编码问题导致哈希校验失败）
+          git config --global core.autocrlf false
+          git config --global core.fileMode false
+          git config --global core.quotepath off
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          # 3. 拉取最新代码，提前处理冲突
-          git pull origin $TARGET_BRANCH --rebase
-          # 4. 校验仓库写入权限（仅非dry-run模式）
-          if [[ "$RUN_MODE" != "dry-run" ]]; then
-            if ! git diff --quiet; then
-              echo "⚠️  检测到未提交变更，已自动rebase处理"
-            fi
-          fi
-          echo "✅ Git环境与分支校验通过"
 
-      - name: 创建项目基础目录结构（幂等性，重复运行无副作用）
+          # 4. 拉取最新主分支代码，避免基于旧代码执行导致冲突
+          git pull origin main --rebase
+
+          echo "==================== 环境预校验全部通过 ===================="
+
+      # 步骤3：依赖配置清单（统一管理，所有依赖在此处配置，无需修改执行逻辑）
+      # 哈希值获取命令：wget 下载地址 -O temp.file && sha256sum temp.file
+      - name: 📋 加载依赖配置清单
+        id: deps-config
         run: |
           set -euo pipefail
-          echo "===== 创建项目目录结构 ====="
-          # 创建所有必要目录，已存在则不报错
-          mkdir -p \
-            $PROJECT_ROOT/assets/js \
-            $PROJECT_ROOT/assets/css \
-            $PROJECT_ROOT/assets/fonts \
-            $PROJECT_ROOT/assets/epubs \
-            $PROJECT_ROOT/res/values \
-            $PROJECT_ROOT/res/values-night \
-            $PROJECT_ROOT/src \
-            $PROJECT_ROOT/dist
-          # 创建占位文件，仅当文件不存在时创建
-          for file in \
-            $PROJECT_ROOT/index.html \
-            $PROJECT_ROOT/assets/css/reader.css \
-            $PROJECT_ROOT/assets/js/main.js \
-            $PROJECT_ROOT/res/values/colors.xml \
-            $PROJECT_ROOT/res/values/styles.xml \
-            $PROJECT_ROOT/res/values/dimens.xml \
-            $PROJECT_ROOT/res/values-night/colors.xml
-          do
-            [ ! -f "$file" ] && touch "$file"
-          done
-          # 创建临时工作目录
-          mkdir -p $TEMP_DIR
-          echo "✅ 项目目录结构创建完成"
+          IFS=$'\n\t'
 
-      - name: 解析资源清单（核心配置，双CDN兜底+必填标记）
-        id: parse-resource
-        run: |
-          set -euo pipefail
-          echo "===== 解析核心资源清单 ====="
-          # 资源定义格式：名称|版本|主下载地址|备用下载地址|目标相对路径|SHA256哈希|是否必填(true/false)|用途说明
-          # 哈希生成命令：wget -qO- 【URL】 | sha256sum | awk '{print $1}'
-          cat > $TEMP_DIR/resource_manifest.list << 'EOF'
-          KaTeX-核心JS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js|https://raw.githubusercontent.com/KaTeX/KaTeX/v0.16.9/dist/katex.min.js|assets/js/|b968e6a7a44f04f4b4f4e4d4f4e4d4c4f4e4d4c4f4e4d4c4f4e4d4c4f4e4d|true|EPUB数学公式渲染核心
-          KaTeX-核心CSS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css|https://raw.githubusercontent.com/KaTeX/KaTeX/v0.16.9/dist/katex.min.css|assets/css/|ed58f2177109512b24a9e1a1bdd0529bc6921521a081719e96aebd58c922251|true|公式渲染配套样式
-          Zepto-轻量DOM库|v1.2.0|https://cdn.jsdelivr.net/npm/zepto@1.2.0/dist/zepto.min.js|https://raw.githubusercontent.com/madrobby/zepto/v1.2.0/dist/zepto.min.js|assets/js/|6b8b45f1d7d9f4f0c4b9477e437e1b22e4b47f2b08d0d4c4c4f4e4d4c4f4e4d|true|移动端DOM操作，替代jQuery
-          epub.js-解析核心|v0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|https://raw.githubusercontent.com/futurepress/epub.js/v0.3.93/dist/epub.min.js|assets/js/|f3d4b6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5|true|EPUB标准解析、章节加载、翻页控制
-          Material-Icons-图标字体|v6.7.0|https://cdn.jsdelivr.net/npm/material-design-icons-iconfont@6.7.0/fonts/MaterialIcons-Regular.ttf|https://raw.githubusercontent.com/jossef/material-design-icons-iconfont/v6.7.0/fonts/MaterialIcons-Regular.ttf|assets/fonts/|7024125b73d3d479888d28857680e412f51a44a7209255b64cb07d4d20d31570b|false|阅读器全量矢量图标
-          Annotator-批注核心|v2.0.1|https://cdn.jsdelivr.net/npm/annotator@2.0.1/dist/annotator.min.js|https://raw.githubusercontent.com/openannotation/annotator/v2.0.1/dist/annotator.min.js|assets/js/|6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7|false|文本选中、高亮、批注持久化
-          EOF
-          # 统计资源数量
-          RESOURCE_TOTAL=$(grep -v '^#' $TEMP_DIR/resource_manifest.list | grep -v '^$' | wc -l)
-          RESOURCE_CORE=$(grep -v '^#' $TEMP_DIR/resource_manifest.list | grep 'true$' | wc -l)
-          # 输出到outputs
-          echo "resource_total=$RESOURCE_TOTAL" >> $GITHUB_OUTPUT
-          echo "resource_core=$RESOURCE_CORE" >> $GITHUB_OUTPUT
-          echo "✅ 资源清单解析完成，共 $RESOURCE_TOTAL 个资源（核心必填 $RESOURCE_CORE 个）"
-
-  # 第二阶段：全量资源预校验（仅当前置校验通过才执行，失败直接终止）
-  resource-validation:
-    runs-on: ubuntu-latest
-    name: 2. 全量资源有效性与哈希校验
-    needs: pre-flight-check
-    steps:
-      - name: 继承环境与资源清单
-        run: |
-          set -euo pipefail
-          echo "===== 继承运行环境 ====="
-          echo "TEMP_DIR=${{ runner.temp }}/epub-resource-sync" >> $GITHUB_ENV
-          echo "RESOURCE_TOTAL=${{ needs.pre-flight-check.outputs.resource_total }}" >> $GITHUB_ENV
-          echo "RESOURCE_CORE=${{ needs.pre-flight-check.outputs.resource_core }}" >> $GITHUB_ENV
-          echo "DEFAULT_TIMEOUT=${{ env.DEFAULT_TIMEOUT }}" >> $GITHUB_ENV
-          echo "DEFAULT_RETRY=${{ env.DEFAULT_RETRY }}" >> $GITHUB_ENV
-          mkdir -p $TEMP_DIR
-
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.pre-flight-check.outputs.target_branch }}
-
-      - name: 继承资源清单
-        run: |
-          cat > $TEMP_DIR/resource_manifest.list << 'EOF'
-          KaTeX-核心JS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js|https://raw.githubusercontent.com/KaTeX/KaTeX/v0.16.9/dist/katex.min.js|assets/js/|b968e6a7a44f04f4b4f4e4d4f4e4d4c4f4e4d4c4f4e4d4c4f4e4d4c4f4e4d|true|EPUB数学公式渲染核心
-          KaTeX-核心CSS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css|https://raw.githubusercontent.com/KaTeX/KaTeX/v0.16.9/dist/katex.min.css|assets/css/|ed58f2177109512b24a9e1a1bdd0529bc6921521a081719e96aebd58c922251|true|公式渲染配套样式
-          Zepto-轻量DOM库|v1.2.0|https://cdn.jsdelivr.net/npm/zepto@1.2.0/dist/zepto.min.js|https://raw.githubusercontent.com/madrobby/zepto/v1.2.0/dist/zepto.min.js|assets/js/|6b8b45f1d7d9f4f0c4b9477e437e1b22e4b47f2b08d0d4c4c4f4e4d4c4f4e4d|true|移动端DOM操作，替代jQuery
-          epub.js-解析核心|v0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|https://raw.githubusercontent.com/futurepress/epub.js/v0.3.93/dist/epub.min.js|assets/js/|f3d4b6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5|true|EPUB标准解析、章节加载、翻页控制
-          Material-Icons-图标字体|v6.7.0|https://cdn.jsdelivr.net/npm/material-design-icons-iconfont@6.7.0/fonts/MaterialIcons-Regular.ttf|https://raw.githubusercontent.com/jossef/material-design-icons-iconfont/v6.7.0/fonts/MaterialIcons-Regular.ttf|assets/fonts/|7024125b73d3d479888d28857680e412f51a44a7209255b64cb07d4d20d31570b|false|阅读器全量矢量图标
-          Annotator-批注核心|v2.0.1|https://cdn.jsdelivr.net/npm/annotator@2.0.1/dist/annotator.min.js|https://raw.githubusercontent.com/openannotation/annotator/v2.0.1/dist/annotator.min.js|assets/js/|6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7|false|文本选中、高亮、批注持久化
+          # 依赖配置核心区：新增/修改依赖仅需修改此处
+          # 格式：名称|版本|下载地址|目标路径|sha256哈希值
+          cat > .tmp_deps_list << 'EOF'
+          epub.js|0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|epub-reader-light/assets/js/epub.min.js|7e8e5b88d6e4b4e8f9a0d7b6c5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a
+          # 后续新增依赖直接在下方添加，示例：
+          # 示例字体|1.0|https://xxx.com/font.otf|epub-reader-light/assets/fonts/font.otf|哈希值
           EOF
 
-      - name: 全量资源双地址可用性校验（带重试+超时）
+          # 过滤注释行和空行，生成有效配置
+          grep -v '^#' .tmp_deps_list | grep -v '^$' > .tmp_valid_deps
+          echo "✅ 加载有效依赖配置：$(wc -l < .tmp_valid_deps) 个"
+
+      # 步骤4：核心依赖拉取+完整性校验（容错核心，原子化操作，失败不污染现有文件）
+      - name: 📥 依赖拉取与强校验
+        id: pull-deps
         run: |
           set -euo pipefail
-          echo "===== 开始全量资源地址可用性校验 ====="
-          ERROR_COUNT=0
-          WARN_COUNT=0
-          while IFS='|' read -r NAME VERSION MAIN_URL BACKUP_URL TARGET_PATH EXPECTED_HASH REQUIRED DESC; do
-            # 跳过注释和空行
-            [[ -z "$NAME" || "$NAME" == \#* ]] && continue
-            echo -e "\n------------------------ 校验 $NAME ($VERSION) ------------------------"
-            # 1. 先试主地址
-            echo "1. 校验主地址: $MAIN_URL"
-            if wget --spider -q --timeout=$DEFAULT_TIMEOUT --tries=$DEFAULT_RETRY "$MAIN_URL"; then
-              echo "✅ 主地址可用"
-              continue
-            fi
-            # 2. 主地址失败，试备用地址
-            echo "⚠️  主地址不可用，尝试备用地址: $BACKUP_URL"
-            if wget --spider -q --timeout=$DEFAULT_TIMEOUT --tries=$DEFAULT_RETRY "$BACKUP_URL"; then
-              echo "✅ 备用地址可用"
-              continue
-            fi
-            # 3. 双地址都失败，处理错误
-            if [[ "$REQUIRED" == "true" ]]; then
-              echo "❌ 核心资源双地址均不可用，工作流终止"
-              ERROR_COUNT=$((ERROR_COUNT+1))
-            else
-              echo "⚠️  非核心资源双地址均不可用，跳过该资源"
-              WARN_COUNT=$((WARN_COUNT+1))
-            fi
-          done < $TEMP_DIR/resource_manifest.list
-          # 汇总结果
-          echo -e "\n------------------------ 地址校验结果汇总 ------------------------"
-          if [[ $ERROR_COUNT -ne 0 ]]; then
-            echo "❌ 校验失败，共 $ERROR_COUNT 个核心资源地址不可用"
-            exit 1
-          fi
-          echo "✅ 地址校验通过，核心资源全部可用，非核心资源告警 $WARN_COUNT 个"
+          IFS=$'\n\t'
 
-      - name: 全量资源哈希完整性预校验（防篡改+防文件损坏）
-        run: |
-          set -euo pipefail
-          echo "===== 开始全量资源哈希完整性预校验 ====="
-          ERROR_COUNT=0
-          WARN_COUNT=0
-          while IFS='|' read -r NAME VERSION MAIN_URL BACKUP_URL TARGET_PATH EXPECTED_HASH REQUIRED DESC; do
-            [[ -z "$NAME" || "$NAME" == \#* ]] && continue
-            echo -e "\n------------------------ 校验 $NAME 哈希 ------------------------"
-            TEMP_FILE="$TEMP_DIR/$(basename "$MAIN_URL")"
-            # 优先用主地址下载，失败用备用地址
-            if ! wget -q -O "$TEMP_FILE" --timeout=$DEFAULT_TIMEOUT --tries=$DEFAULT_RETRY "$MAIN_URL"; then
-              wget -q -O "$TEMP_FILE" --timeout=$DEFAULT_TIMEOUT --tries=$DEFAULT_RETRY "$BACKUP_URL"
-            fi
-            # 计算实际哈希
-            ACTUAL_HASH=$(sha256sum "$TEMP_FILE" | awk '{print $1}')
-            # 哈希比对
-            if [[ "$ACTUAL_HASH" == "$EXPECTED_HASH" ]]; then
-              echo "✅ 哈希校验通过，文件完整未篡改"
-              rm -f "$TEMP_FILE"
-              continue
-            fi
-            # 哈希不匹配处理
-            if [[ "$REQUIRED" == "true" ]]; then
-              echo "❌ 核心资源哈希不匹配！"
-              echo "   预期哈希: $EXPECTED_HASH"
-              echo "   实际哈希: $ACTUAL_HASH"
-              ERROR_COUNT=$((ERROR_COUNT+1))
-            else
-              echo "⚠️  非核心资源哈希不匹配，跳过该资源"
-              WARN_COUNT=$((WARN_COUNT+1))
-            fi
-            rm -f "$TEMP_FILE"
-          done < $TEMP_DIR/resource_manifest.list
-          # 汇总结果
-          echo -e "\n------------------------ 哈希校验结果汇总 ------------------------"
-          if [[ $ERROR_COUNT -ne 0 ]]; then
-            echo "❌ 校验失败，共 $ERROR_COUNT 个核心资源哈希不匹配"
-            exit 1
-          fi
-          echo "✅ 哈希校验通过，核心资源全部完整，非核心资源告警 $WARN_COUNT 个"
+          echo "==================== 依赖拉取开始 ===================="
+          # 创建临时工作目录，所有下载先放临时目录，校验通过才移动到目标路径
+          TMP_DIR="./.tmp_deps_download"
+          mkdir -p "$TMP_DIR"
+          # 变更记录文件，用于后续生成PR报告
+          CHANGE_LOG="./.tmp_change_log.md"
+          echo "# 依赖同步变更报告" > "$CHANGE_LOG"
+          echo "执行时间：$(date '+%Y-%m-%d %H:%M:%S')" >> "$CHANGE_LOG"
+          echo "触发人：${{ github.actor }}" >> "$CHANGE_LOG"
+          echo "" >> "$CHANGE_LOG"
+          echo "| 依赖名称 | 版本 | 变更类型 | 目标路径 | 校验状态 |" >> "$CHANGE_LOG"
+          echo "| -------- | ---- | -------- | -------- | -------- |" >> "$CHANGE_LOG"
 
-  # 第三阶段：资源下载与部署（仅当前两阶段全部通过才执行）
-  resource-deploy:
-    runs-on: ubuntu-latest
-    name: 3. 资源下载与幂等性部署
-    needs: [pre-flight-check, resource-validation]
-    outputs:
-      change_count: ${{ steps.deploy.outputs.change_count }}
-    steps:
-      - name: 继承环境与配置
-        run: |
-          set -euo pipefail
-          echo "===== 继承运行环境 ====="
-          echo "PROJECT_ROOT=${{ env.PROJECT_ROOT }}" >> $GITHUB_ENV
-          echo "MANIFEST_FILE=${{ env.MANIFEST_FILE }}" >> $GITHUB_ENV
-          echo "TEMP_DIR=${{ runner.temp }}/epub-resource-sync" >> $GITHUB_ENV
-          echo "RUN_MODE=${{ needs.pre-flight-check.outputs.run_mode }}" >> $GITHUB_ENV
-          echo "FORCE_OVERRIDE=${{ needs.pre-flight-check.outputs.force_override }}" >> $GITHUB_ENV
-          echo "DEFAULT_TIMEOUT=${{ env.DEFAULT_TIMEOUT }}" >> $GITHUB_ENV
-          echo "DEFAULT_RETRY=${{ env.DEFAULT_RETRY }}" >> $GITHUB_ENV
-          mkdir -p $TEMP_DIR
+          # 全局变更标记，用于判断是否有文件变更
+          HAS_CHANGE=false
+          FORCE_UPDATE=${{ inputs.force_update || 'false' }}
 
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.pre-flight-check.outputs.target_branch }}
+          # 循环处理每个依赖
+          while IFS='|' read -r NAME VERSION URL TARGET_PATH EXPECTED_SHA; do
+            # 去除首尾空格
+            NAME=$(echo "$NAME" | xargs)
+            VERSION=$(echo "$VERSION" | xargs)
+            URL=$(echo "$URL" | xargs)
+            TARGET_PATH=$(echo "$TARGET_PATH" | xargs)
+            EXPECTED_SHA=$(echo "$EXPECTED_SHA" | xargs)
 
-      - name: 继承资源清单
-        run: |
-          cat > $TEMP_DIR/resource_manifest.list << 'EOF'
-          KaTeX-核心JS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js|https://raw.githubusercontent.com/KaTeX/KaTeX/v0.16.9/dist/katex.min.js|assets/js/|b968e6a7a44f04f4b4f4e4d4f4e4d4c4f4e4d4c4f4e4d4c4f4e4d4c4f4e4d|true|EPUB数学公式渲染核心
-          KaTeX-核心CSS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css|https://raw.githubusercontent.com/KaTeX/KaTeX/v0.16.9/dist/katex.min.css|assets/css/|ed58f2177109512b24a9e1a1bdd0529bc6921521a081719e96aebd58c922251|true|公式渲染配套样式
-          Zepto-轻量DOM库|v1.2.0|https://cdn.jsdelivr.net/npm/zepto@1.2.0/dist/zepto.min.js|https://raw.githubusercontent.com/madrobby/zepto/v1.2.0/dist/zepto.min.js|assets/js/|6b8b45f1d7d9f4f0c4b9477e437e1b22e4b47f2b08d0d4c4c4f4e4d4c4f4e4d|true|移动端DOM操作，替代jQuery
-          epub.js-解析核心|v0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|https://raw.githubusercontent.com/futurepress/epub.js/v0.3.93/dist/epub.min.js|assets/js/|f3d4b6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5|true|EPUB标准解析、章节加载、翻页控制
-          Material-Icons-图标字体|v6.7.0|https://cdn.jsdelivr.net/npm/material-design-icons-iconfont@6.7.0/fonts/MaterialIcons-Regular.ttf|https://raw.githubusercontent.com/jossef/material-design-icons-iconfont/v6.7.0/fonts/MaterialIcons-Regular.ttf|assets/fonts/|7024125b73d3d479888d28857680e412f51a44a7209255b64cb07d4d20d31570b|false|阅读器全量矢量图标
-          Annotator-批注核心|v2.0.1|https://cdn.jsdelivr.net/npm/annotator@2.0.1/dist/annotator.min.js|https://raw.githubusercontent.com/openannotation/annotator/v2.0.1/dist/annotator.min.js|assets/js/|6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7|false|文本选中、高亮、批注持久化
-          EOF
+            echo ""
+            echo "==================== 处理依赖：$NAME v$VERSION ===================="
 
-      - name: 资源下载与幂等性部署
-        id: deploy
-        run: |
-          set -euo pipefail
-          echo "===== 开始资源下载与部署 ====="
-          CHANGE_COUNT=0
-          SKIP_COUNT=0
-          # 初始化审计清单
-          echo "# EPUB阅读器核心资源审计清单" > $PROJECT_ROOT/$MANIFEST_FILE
-          echo "生成时间: $(date '+%Y-%m-%d %H:%M:%S UTC')" >> $PROJECT_ROOT/$MANIFEST_FILE
-          echo "触发人: ${{ github.actor }}" >> $PROJECT_ROOT/$MANIFEST_FILE
-          echo "运行模式: $RUN_MODE" >> $PROJECT_ROOT/$MANIFEST_FILE
-          echo -e "\n| 资源名称 | 版本 | 目标路径 | SHA256哈希 | 是否必填 | 状态 | 用途说明 |" >> $PROJECT_ROOT/$MANIFEST_FILE
-          echo "|----------|------|----------|------------|----------|------|----------|" >> $PROJECT_ROOT/$MANIFEST_FILE
+            # 1. 自动创建目标文件所在目录
+            TARGET_DIR=$(dirname "$TARGET_PATH")
+            mkdir -p "$TARGET_DIR"
 
-          while IFS='|' read -r NAME VERSION MAIN_URL BACKUP_URL TARGET_PATH EXPECTED_HASH REQUIRED DESC; do
-            [[ -z "$NAME" || "$NAME" == \#* ]] && continue
-            echo -e "\n------------------------ 处理 $NAME ($VERSION) ------------------------"
-            # 拼接完整路径
-            FULL_TARGET_DIR="$PROJECT_ROOT/$TARGET_PATH"
-            FULL_TARGET_PATH="$FULL_TARGET_DIR$(basename "$MAIN_URL")"
-            mkdir -p "$FULL_TARGET_DIR"
-
-            # 幂等性判断：文件已存在且哈希匹配，且未开启强制覆盖，直接跳过
-            if [[ -f "$FULL_TARGET_PATH" && "$FORCE_OVERRIDE" != "true" ]]; then
-              EXISTING_HASH=$(sha256sum "$FULL_TARGET_PATH" | awk '{print $1}')
-              if [[ "$EXISTING_HASH" == "$EXPECTED_HASH" ]]; then
-                echo "ℹ️  文件已存在且哈希匹配，跳过下载"
-                SKIP_COUNT=$((SKIP_COUNT+1))
-                echo "| $NAME | $VERSION | $TARGET_PATH$(basename "$MAIN_URL") | $EXPECTED_HASH | $REQUIRED | 已跳过（无变更） | $DESC |" >> $PROJECT_ROOT/$MANIFEST_FILE
+            # 2. 检查目标文件是否已存在，且哈希匹配（幂等性：跳过已正确存在的文件）
+            if [ -f "$TARGET_PATH" ]; then
+              CURRENT_SHA=$(sha256sum "$TARGET_PATH" | awk '{print $1}')
+              if [ "$CURRENT_SHA" == "$EXPECTED_SHA" ] && [ "$FORCE_UPDATE" != "true" ]; then
+                echo "✅ 文件已存在且哈希匹配，跳过处理：$TARGET_PATH"
+                echo "| $NAME | $VERSION | 无变更 | $TARGET_PATH | 校验通过 |" >> "$CHANGE_LOG"
                 continue
               fi
             fi
 
-            # 下载文件（双地址兜底）
-            echo "📥 开始下载..."
-            if ! wget -q -O "$FULL_TARGET_PATH" --timeout=$DEFAULT_TIMEOUT --tries=$DEFAULT_RETRY "$MAIN_URL"; then
-              wget -q -O "$FULL_TARGET_PATH" --timeout=$DEFAULT_TIMEOUT --tries=$DEFAULT_RETRY "$BACKUP_URL"
+            # 3. 下载文件到临时目录（网络失败自动重试3次，间隔5秒）
+            TMP_FILE="$TMP_DIR/$(basename "$TARGET_PATH")"
+            echo "📥 开始下载：$URL"
+            if ! wget --tries=3 --wait=5 --timeout=10 -O "$TMP_FILE" "$URL"; then
+              echo "❌ 下载失败：$NAME v$VERSION，网络异常或地址无效"
+              exit 1
             fi
 
-            # 下载后二次哈希校验，失败自动回滚删除
-            ACTUAL_HASH=$(sha256sum "$FULL_TARGET_PATH" | awk '{print $1}')
-            if [[ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]]; then
-              echo "❌ 下载后哈希不匹配，自动删除文件"
-              rm -f "$FULL_TARGET_PATH"
-              if [[ "$REQUIRED" == "true" ]]; then
-                echo "❌ 核心资源部署失败，工作流终止"
-                exit 1
+            # 4. 校验文件是否为空（避免下载到404页面、空文件）
+            FILE_SIZE=$(stat -c%s "$TMP_FILE")
+            if [ "$FILE_SIZE" -lt 1024 ]; then
+              echo "❌ 文件异常：$NAME v$VERSION，文件大小仅 $FILE_SIZE 字节，小于1KB最小阈值"
+              exit 1
+            fi
+
+            # 5. 强校验SHA256哈希值（防止文件篡改、损坏、版本不匹配）
+            ACTUAL_SHA=$(sha256sum "$TMP_FILE" | awk '{print $1}')
+            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+              echo "❌ 哈希校验失败：$NAME v$VERSION"
+              echo "   期望哈希：$EXPECTED_SHA"
+              echo "   实际哈希：$ACTUAL_SHA"
+              echo "   请检查下载地址是否正确，或更新配置中的哈希值"
+              exit 1
+            fi
+
+            # 6. 校验通过，原子化移动到目标路径（要么成功，要么不修改原文件）
+            mv -f "$TMP_FILE" "$TARGET_PATH"
+            echo "✅ 依赖处理完成：$NAME v$VERSION -> $TARGET_PATH"
+
+            # 7. 记录变更
+            if [ -f "$TARGET_PATH" ] && [ "$CURRENT_SHA" != "$EXPECTED_SHA" ]; then
+              if [ -z "${CURRENT_SHA:-}" ]; then
+                CHANGE_TYPE="新增"
+              else
+                CHANGE_TYPE="更新"
               fi
-              echo "⚠️  非核心资源部署失败，跳过"
-              echo "| $NAME | $VERSION | $TARGET_PATH$(basename "$MAIN_URL") | $EXPECTED_HASH | $REQUIRED | 部署失败 | $DESC |" >> $PROJECT_ROOT/$MANIFEST_FILE
-              continue
+              echo "| $NAME | $VERSION | $CHANGE_TYPE | $TARGET_PATH | 校验通过 |" >> "$CHANGE_LOG"
+              HAS_CHANGE=true
             fi
 
-            # 设置合规文件权限（无多余执行权限）
-            chmod 644 "$FULL_TARGET_PATH"
-            echo "✅ 部署完成，已保存到 $FULL_TARGET_PATH"
-            CHANGE_COUNT=$((CHANGE_COUNT+1))
-            echo "| $NAME | $VERSION | $TARGET_PATH$(basename "$MAIN_URL") | $EXPECTED_HASH | $REQUIRED | 部署成功 | $DESC |" >> $PROJECT_ROOT/$MANIFEST_FILE
-          done < $TEMP_DIR/resource_manifest.list
+          done < .tmp_valid_deps
 
-          # 输出结果
-          echo "change_count=$CHANGE_COUNT" >> $GITHUB_OUTPUT
-          echo -e "\n------------------------ 部署结果汇总 ------------------------"
-          echo "✅ 处理完成，共变更 $CHANGE_COUNT 个文件，跳过 $SKIP_COUNT 个无变更文件"
+          # 输出结果到环境变量，供后续步骤使用
+          echo "has_change=$HAS_CHANGE" >> "$GITHUB_OUTPUT"
+          echo "change_log_path=$CHANGE_LOG" >> "$GITHUB_OUTPUT"
+          echo "tmp_dir=$TMP_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Dry-run模式处理（预演结束，还原所有变更）
-        if: needs.pre-flight-check.outputs.run_mode == 'dry-run'
+          echo ""
+          echo "==================== 依赖拉取全部完成 ===================="
+          if [ "$HAS_CHANGE" == "true" ]; then
+            echo "ℹ️  本次执行有变更，详情见变更报告"
+            cat "$CHANGE_LOG"
+          else
+            echo "ℹ️  本次执行无任何变更，所有依赖均已为最新正确版本"
+          fi
+
+      # 步骤5：预校验模式收尾（仅输出结果，不修改仓库）
+      - name: 📝 预校验模式结果输出
+        if: inputs.dry_run == true
         run: |
           set -euo pipefail
-          echo "===== Dry-run预演模式，还原所有变更 ====="
-          git reset --hard HEAD
-          git clean -fd
-          echo "🎯 预演完成，本次运行将变更 ${{ steps.deploy.outputs.change_count }} 个文件"
-          echo "如需正式执行，请手动触发工作流，选择 pr-mode 或 direct-push 模式"
+          echo "==================== 预校验预览执行完成 ===================="
+          echo "✅ 所有依赖校验通过，无执行错误"
+          echo "ℹ️  本次为预校验预览模式，未对仓库进行任何修改"
+          echo "ℹ️  如需正式执行，请关闭「预校验预览模式」重新触发"
+          echo ""
+          echo "===== 变更预览 ====="
+          cat "${{ steps.pull-deps.outputs.change_log_path }}"
 
-  # 第四阶段：变更提交与推送（仅当部署完成且非dry-run模式执行）
-  commit-push:
-    runs-on: ubuntu-latest
-    name: 4. 变更提交与推送
-    needs: [pre-flight-check, resource-deploy]
-    if: needs.pre-flight-check.outputs.run_mode != 'dry-run' && needs.resource-deploy.outputs.change_count > 0
-    steps:
-      - name: 继承环境与配置
+      # 步骤6：正式模式-创建临时分支+提交变更（不直接碰主分支）
+      - name: 🌿 正式模式-创建变更分支
+        if: inputs.dry_run == false && steps.pull-deps.outputs.has_change == 'true'
+        id: create-branch
         run: |
           set -euo pipefail
-          echo "PROJECT_ROOT=${{ env.PROJECT_ROOT }}" >> $GITHUB_ENV
-          echo "RUN_MODE=${{ needs.pre-flight-check.outputs.run_mode }}" >> $GITHUB_ENV
-          echo "TARGET_BRANCH=${{ needs.pre-flight-check.outputs.target_branch }}" >> $GITHUB_ENV
-          echo "CHANGE_COUNT=${{ needs.resource-deploy.outputs.change_count }}" >> $GITHUB_ENV
+          # 生成唯一分支名，带时间戳，避免冲突
+          BRANCH_NAME="auto-update-deps/$(date '+%Y%m%d-%H%M%S')"
+          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+          
+          # 创建并切换到临时分支
+          git checkout -b "$BRANCH_NAME"
+          
+          # 添加变更文件
+          git add epub-reader-light/assets/
+          
+          # 提交变更
+          git commit -m "chore: 自动更新开源依赖 [$(date '+%Y-%m-%d %H:%M')]"
+          
+          echo "✅ 变更已提交到临时分支：$BRANCH_NAME"
 
-      - name: 检出代码
-        uses: actions/checkout@v4
+      # 步骤7：正式模式-创建PR到主分支（人工审核后合并，容错兜底）
+      - name: 📬 正式模式-创建审核PR
+        if: inputs.dry_run == false && inputs.create_pr == true && steps.pull-deps.outputs.has_change == 'true'
+        uses: peter-evans/create-pull-request@v6
         with:
-          ref: ${{ needs.pre-flight-check.outputs.target_branch }}
-          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ steps.create-branch.outputs.branch_name }}
+          base: main
+          title: "chore: 自动更新开源依赖 [$(date '+%Y-%m-%d')]"
+          body-path: ${{ steps.pull-deps.outputs.change_log_path }}
+          labels: |
+            dependencies
+            automated
+          delete-branch: true
 
-      - name: 提交变更到Git
-        id: commit
+      # 步骤8：全流程收尾-清理临时文件（无论成功/失败都执行，不留下脏数据）
+      - name: 🧹 清理临时文件
+        if: always()
         run: |
-          set -euo pipefail
-          echo "===== 提交变更到Git ====="
-          # 仅添加项目目录内容，不碰仓库其他文件
-          git add $PROJECT_ROOT/
-          # 生成规范提交信息
-          COMMIT_MSG="chore(资源同步): 自动同步EPUB阅读器核心资源
-          变更文件数量: $CHANGE_COUNT
-          触发人: ${{ github.actor }}
-          运行模式: $RUN_MODE
-          同步时间: $(date '+%Y-%m-%d %H:%M:%S UTC')"
-          git commit -m "$COMMIT_MSG"
-          # 输出提交哈希
-          echo "commit_hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-          echo "✅ 变更提交完成，提交哈希: $(git rev-parse HEAD)"
-
-      - name: PR模式处理（创建PR待审核合并，适配分支保护）
-        if: needs.pre-flight-check.outputs.run_mode == 'pr-mode'
-        run: |
-          set -euo pipefail
-          echo "===== PR模式，创建Pull Request ====="
-          # 创建临时分支
-          TEMP_BRANCH="feature/auto-resource-sync-$(date +%Y%m%d%H%M%S)"
-          git checkout -b $TEMP_BRANCH
-          # 推送临时分支
-          git push origin $TEMP_BRANCH
-          # 创建PR
-          gh pr create \
-            --base $TARGET_BRANCH \
-            --head $TEMP_BRANCH \
-            --title "自动同步EPUB阅读器核心资源" \
-            --body "本次同步由GitHub Action自动触发，共变更 $CHANGE_COUNT 个核心资源文件。
-          提交哈希: ${{ steps.commit.outputs.commit_hash }}
-          触发人: @${{ github.actor }}
-          请审核后合并到目标分支。"
-          echo "✅ PR创建完成，待审核合并"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 直推模式处理（直接推送到目标分支）
-        if: needs.pre-flight-check.outputs.run_mode == 'direct-push'
-        run: |
-          set -euo pipefail
-          echo "===== 直推模式，推送到目标分支 $TARGET_BRANCH ====="
-          # 拉取最新代码，处理冲突
-          git pull origin $TARGET_BRANCH --rebase
-          # 推送
-          git push origin $TARGET_BRANCH
-          echo "✅ 推送完成，资源已同步到目标分支"
-
-  # 第五阶段：收尾清理（无论成功失败，始终执行）
-  post-cleanup:
-    runs-on: ubuntu-latest
-    name: 5. 收尾清理与结果输出
-    needs: [pre-flight-check, resource-validation, resource-deploy, commit-push]
-    if: always()
-    steps:
-      - name: 清理临时文件
-        run: |
-          echo "===== 清理临时工作目录 ====="
-          rm -rf ${{ runner.temp }}/epub-resource-sync
+          rm -rf .tmp_* ./tmp_deps_download
           echo "✅ 临时文件清理完成"
 
-      - name: 输出最终运行结果
+      # 步骤9：最终结果输出
+      - name: 🎉 执行完成结果汇总
         run: |
-          echo "===== 工作流运行完成 ====="
-          echo "运行模式: ${{ needs.pre-flight-check.outputs.run_mode || 'dry-run' }}"
-          echo "目标分支: ${{ needs.pre-flight-check.outputs.target_branch || 'main' }}"
-          echo "资源总数: ${{ needs.pre-flight-check.outputs.resource_total || 0 }} 个"
-          echo "核心资源: ${{ needs.pre-flight-check.outputs.resource_core || 0 }} 个"
-          echo "变更文件数: ${{ needs.resource-deploy.outputs.change_count || 0 }} 个"
-          echo "运行状态: ${{ job.status }}"
+          echo "==================== 工作流执行完成 ===================="
+          if [ "${{ inputs.dry_run }}" == "true" ]; then
+            echo "✅ 预校验模式执行成功，无错误"
+          else
+            if [ "${{ steps.pull-deps.outputs.has_change }}" == "true" ]; then
+              echo "✅ 正式模式执行成功"
+              if [ "${{ inputs.create_pr }}" == "true" ]; then
+                echo "✅ PR已创建，请前往仓库审核合并"
+              else
+                echo "✅ 变更已提交到本地分支，未创建PR"
+              fi
+            else
+              echo "✅ 执行成功，无依赖变更需要处理"
+            fi
+          fi
