@@ -1,27 +1,10 @@
 name: EPUB阅读器依赖同步
 on:
+  # 只要push到main分支就触发，不再限制路径，避免不执行
   push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/sync-epubjs.yml"
+    branches: [ main ]
+  # 保留手动触发入口
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "预校验模式：仅检查不修改仓库"
-        type: boolean
-        default: true
-        required: false
-      create_pr:
-        description: "正式模式：变更通过PR人工审核合并"
-        type: boolean
-        default: true
-        required: false
-      force_update:
-        description: "强制覆盖已存在的文件"
-        type: boolean
-        default: false
-        required: false
 
 permissions:
   contents: write
@@ -34,236 +17,128 @@ defaults:
 jobs:
   sync-epub-deps:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      # 全局兜底默认值，解决push触发时inputs无值的问题
-      DRY_RUN: ${{ inputs.dry_run != '' && inputs.dry_run || true }}
-      CREATE_PR: ${{ inputs.create_pr != '' && inputs.create_pr || true }}
-      FORCE_UPDATE: ${{ inputs.force_update != '' && inputs.force_update || false }}
+    timeout-minutes: 5
     steps:
-      - name: 拉取项目代码
+      - name: 1. 拉取项目代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          clean: true
-          token: "${{ secrets.GITHUB_TOKEN }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 打印执行参数（确认脚本正常启动）
+      - name: 2. 启动日志（确认脚本真的执行了）
         run: |
-          echo "===== 工作流启动成功 ====="
-          echo "执行模式：$DRY_RUN"
-          echo "是否创建PR：$CREATE_PR"
-          echo "是否强制更新：$FORCE_UPDATE"
+          echo "====================================="
+          echo "✅ EPUB依赖同步workflow已成功启动"
           echo "触发方式：${{ github.event_name }}"
-          echo "============================"
+          echo "执行时间：$(date '+%Y-%m-%d %H:%M:%S')"
+          echo "====================================="
 
-      - name: 环境与目录预校验（适配APK构建目录结构）
+      - name: 3. 环境与目录准备
         run: |
           set -euo pipefail
-          IFS=$'\n\t'
-
-          echo "===== 环境预校验开始 ====="
+          echo "===== 环境与工具检查 ====="
           
-          REQUIRED_TOOLS=("wget" "sha256sum" "git" "mkdir" "rm" "mv")
+          # 检查必要工具是否存在
+          REQUIRED_TOOLS=("wget" "sha256sum" "git" "mkdir")
           for TOOL in "${REQUIRED_TOOLS[@]}"; do
             if ! command -v "$TOOL" &> /dev/null; then
               echo "❌ 缺少必要工具：$TOOL"
               exit 1
             fi
-            echo "✅ 工具检查通过：$TOOL"
+            echo "✅ 工具就绪：$TOOL"
           done
 
-          # 固定APK构建兼容的目录结构（WebView打包标准目录）
-          CORE_DIRS=(
-            "epub-reader-light/assets/css"
-            "epub-reader-light/assets/js"
-            "epub-reader-light/assets/fonts"
-            "epub-reader-light/assets/epubs"
-          )
-          for DIR in "${CORE_DIRS[@]}"; do
-            if [ ! -d "$DIR" ]; then
-              echo "⚠️  自动创建目录：$DIR"
-              mkdir -p "$DIR"
-            fi
-            echo "✅ 目录检查通过：$DIR"
-          done
+          # 创建APK打包兼容的目标目录
+          mkdir -p epub-reader-light/assets/js/
+          echo "✅ 目标目录创建完成：epub-reader-light/assets/js/"
 
           # Git环境标准化
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git pull origin main --rebase || true
 
-          echo "===== 环境预校验全部通过 ====="
-
-      - name: 加载依赖配置（核心开源工具，哈希已修正）
-        id: load-config
+      - name: 4. 下载&校验epub.js核心依赖
+        id: download
         run: |
           set -euo pipefail
-          IFS=$'\n\t'
+          echo "===== 开始处理epub.js依赖 ====="
 
-          # 依赖配置区：后续新增开源工具直接在这里加行
-          # 格式：工具名|版本|下载直链|目标路径|SHA256哈希值
-          cat > .deps_list << 'DEPS_EOF'
-          epub.js|0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|epub-reader-light/assets/js/epub.min.js|06eae15745107b4aa508c95538275251f69bfb9f1175621fc458d9f42ed082d4
-          DEPS_EOF
+          # 固定依赖配置，彻底杜绝变量空值问题
+          DEP_NAME="epub.js"
+          DEP_VERSION="0.3.93"
+          DOWNLOAD_URL="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"
+          TARGET_PATH="epub-reader-light/assets/js/epub.min.js"
+          EXPECTED_SHA="06eae15745107b4aa508c95538275251f69bfb9f1175621fc458d9f42ed082d4"
 
-          grep -v '^#' .deps_list | grep -v '^$' > .valid_deps
-          DEP_COUNT=$(wc -l < .valid_deps)
-          echo "dep_count=$DEP_COUNT" >> "$GITHUB_OUTPUT"
-          echo "✅ 加载依赖完成，共 $DEP_COUNT 个依赖"
+          # 临时文件路径
+          TMP_FILE="./epub.min.js.tmp"
 
-      - name: 下载&校验开源依赖
-        id: download-deps
-        run: |
-          set -euo pipefail
-          IFS=$'\n\t'
+          # 下载文件
+          echo "📥 正在下载 $DEP_NAME v$DEP_VERSION"
+          wget --tries=3 --timeout=10 -O "$TMP_FILE" "$DOWNLOAD_URL"
 
-          echo "===== 依赖拉取开始 ====="
-          TMP_DIR="./.tmp_deps"
-          mkdir -p "$TMP_DIR"
-          
-          CHANGE_LOG="./.change_log.md"
-          echo "# 开源依赖同步变更日志" > "$CHANGE_LOG"
-          echo "执行时间：$(date '+%Y-%m-%d %H:%M:%S')" >> "$CHANGE_LOG"
-          echo "触发人：${{ github.actor }}" >> "$CHANGE_LOG"
-          echo "触发方式：${{ github.event_name }}" >> "$CHANGE_LOG"
-          echo "" >> "$CHANGE_LOG"
-          echo "| 工具名 | 版本 | 变更类型 | 目标路径 | 状态 |" >> "$CHANGE_LOG"
-          echo "| ---- | ---- | ---- | ---- | ---- |" >> "$CHANGE_LOG"
+          # 校验文件完整性
+          FILE_SIZE=$(stat -c%s "$TMP_FILE")
+          echo "📦 下载完成，文件大小：$FILE_SIZE 字节"
+          if [ "$FILE_SIZE" -lt 1024 ]; then
+            echo "❌ 文件异常，大小不足1KB，下载失败"
+            exit 1
+          fi
 
+          # SHA256哈希校验
+          ACTUAL_SHA=$(sha256sum "$TMP_FILE" | awk '{print $1}')
+          echo "🔍 期望哈希：$EXPECTED_SHA"
+          echo "🔍 实际哈希：$ACTUAL_SHA"
+
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "❌ 哈希校验失败，文件被篡改或下载不完整"
+            exit 1
+          fi
+          echo "✅ 哈希校验通过！"
+
+          # 判断是否有变更
           HAS_CHANGE=false
-
-          while IFS='|' read -r NAME VERSION URL TARGET_PATH EXPECTED_SHA; do
-            NAME=$(echo "$NAME" | xargs)
-            VERSION=$(echo "$VERSION" | xargs)
-            URL=$(echo "$URL" | xargs)
-            TARGET_PATH=$(echo "$TARGET_PATH" | xargs)
-            EXPECTED_SHA=$(echo "$EXPECTED_SHA" | xargs)
-
-            echo ""
-            echo "===== 处理依赖：$NAME v$VERSION ====="
-
-            TARGET_DIR=$(dirname "$TARGET_PATH")
-            mkdir -p "$TARGET_DIR"
-
-            CURRENT_SHA=""
-            if [ -f "$TARGET_PATH" ]; then
-              CURRENT_SHA=$(sha256sum "$TARGET_PATH" | awk '{print $1}')
-              if [ "$CURRENT_SHA" == "$EXPECTED_SHA" ] && [ "$FORCE_UPDATE" != "true" ]; then
-                echo "✅ 文件已存在且哈希匹配，跳过处理"
-                echo "| $NAME | $VERSION | 无变更 | $TARGET_PATH | 通过 |" >> "$CHANGE_LOG"
-                continue
-              fi
+          if [ -f "$TARGET_PATH" ]; then
+            CURRENT_SHA=$(sha256sum "$TARGET_PATH" | awk '{print $1}')
+            if [ "$CURRENT_SHA" != "$ACTUAL_SHA" ]; then
+              HAS_CHANGE=true
             fi
-
-            TMP_FILE="$TMP_DIR/$(basename "$TARGET_PATH")"
-            echo "📥 开始下载：$URL"
-            if ! wget --tries=3 --wait=5 --timeout=10 -O "$TMP_FILE" "$URL"; then
-              echo "❌ 下载失败：$NAME v$VERSION"
-              exit 1
-            fi
-
-            FILE_SIZE=$(stat -c%s "$TMP_FILE")
-            if [ "$FILE_SIZE" -lt 1024 ]; then
-              echo "❌ 文件异常，大小不足1KB"
-              exit 1
-            fi
-            echo "✅ 下载完成，文件大小：$FILE_SIZE 字节"
-
-            ACTUAL_SHA=$(sha256sum "$TMP_FILE" | awk '{print $1}')
-            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-              echo "❌ 哈希校验失败"
-              echo "期望哈希：$EXPECTED_SHA"
-              echo "实际哈希：$ACTUAL_SHA"
-              exit 1
-            fi
-            echo "✅ 哈希校验通过"
-
-            if [ "$DRY_RUN" != "true" ]; then
-              mv -f "$TMP_FILE" "$TARGET_PATH"
-              echo "✅ 依赖写入完成：$TARGET_PATH"
-            else
-              echo "✅ 预校验通过，dry run模式不修改文件"
-            fi
-
-            CHANGE_TYPE=$([ -z "$CURRENT_SHA" ] && echo "新增" || echo "更新")
-            echo "| $NAME | $VERSION | $CHANGE_TYPE | $TARGET_PATH | 通过 |" >> "$CHANGE_LOG"
+          else
             HAS_CHANGE=true
+          fi
 
-          done < .valid_deps
+          # 移动文件到最终目标路径
+          mv -f "$TMP_FILE" "$TARGET_PATH"
+          echo "✅ 依赖已写入目标路径：$TARGET_PATH"
 
+          # 输出结果给后续步骤使用
           echo "has_change=$HAS_CHANGE" >> "$GITHUB_OUTPUT"
-          echo "change_log_path=$CHANGE_LOG" >> "$GITHUB_OUTPUT"
-          echo "tmp_dir=$TMP_DIR" >> "$GITHUB_OUTPUT"
-          echo "===== 依赖拉取处理完成 ====="
+          echo "target_path=$TARGET_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: 预校验模式结果输出
-        if: env.DRY_RUN == 'true'
+      - name: 5. 提交变更到main分支
+        if: steps.download.outputs.has_change == 'true'
         run: |
           set -euo pipefail
-          echo "===== 预校验执行完成 ====="
-          echo "✅ 所有依赖校验通过，无执行错误"
-          echo "ℹ️  本次为预校验模式，未对仓库进行任何修改"
-          echo ""
-          echo "===== 变更预览 ====="
-          cat "${{ steps.download-deps.outputs.change_log_path }}"
-
-      - name: 创建变更分支
-        if: env.DRY_RUN == 'false' && steps.download-deps.outputs.has_change == 'true'
-        id: create-branch
-        run: |
-          set -euo pipefail
-          BRANCH_NAME="auto-update-deps/$(date '+%Y%m%d-%H%M%S')"
-          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
-          
-          git checkout -b "$BRANCH_NAME"
-          git add epub-reader-light/assets/
-          git commit -m "chore: 自动同步开源依赖 [$(date '+%Y-%m-%d %H:%M')]"
-          echo "✅ 变更分支创建完成：$BRANCH_NAME"
-
-      - name: 创建PR供人工审核
-        if: env.DRY_RUN == 'false' && env.CREATE_PR == 'true' && steps.download-deps.outputs.has_change == 'true'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: "${{ secrets.GITHUB_TOKEN }}"
-          branch: "${{ steps.create-branch.outputs.branch_name }}"
-          base: main
-          title: "chore: 自动同步开源依赖 [$(date '+%Y-%m-%d')]"
-          body-path: "${{ steps.download-deps.outputs.change_log_path }}"
-          labels: |
-            dependencies
-            automated
-          delete-branch: true
-
-      - name: 直接提交到main分支（不创建PR时）
-        if: env.DRY_RUN == 'false' && env.CREATE_PR == 'false' && steps.download-deps.outputs.has_change == 'true'
-        run: |
-          set -euo pipefail
-          git add epub-reader-light/assets/
-          git commit -m "chore: 自动同步开源依赖 [$(date '+%Y-%m-%d %H:%M')]"
+          echo "===== 提交依赖变更 ====="
+          git add ${{ steps.download.outputs.target_path }}
+          git commit -m "chore: 自动同步epub.js v0.3.93依赖"
           git push origin main
-          echo "✅ 依赖已直接提交到main分支"
+          echo "✅ 变更已成功提交到main分支！"
 
-      - name: 清理临时文件
+      - name: 6. 最终执行结果
+        run: |
+          echo "====================================="
+          echo "🎉 workflow执行完成！"
+          if [ "${{ steps.download.outputs.has_change }}" == "true" ]; then
+            echo "✅ epub.js依赖已成功同步到你的仓库"
+            echo "📁 本地文件路径：${{ steps.download.outputs.target_path }}"
+          else
+            echo "ℹ️  依赖已存在且无变更，无需更新"
+          fi
+          echo "====================================="
+
+      - name: 7. 清理临时文件
         if: always()
         run: |
-          rm -rf .tmp_* .deps_list .valid_deps .change_log.md
+          rm -f ./*.tmp
           echo "✅ 临时文件清理完成"
-
-      - name: 最终执行结果
-        run: |
-          echo "===== 工作流执行完成 ====="
-          if [ "$DRY_RUN" == "true" ]; then
-            echo "✅ 预校验模式执行成功，所有依赖校验通过"
-          else
-            if [ "${{ steps.download-deps.outputs.has_change }}" == "true" ]; then
-              echo "✅ 正式模式执行成功"
-              if [ "$CREATE_PR" == "true" ]; then
-                echo "✅ PR已创建，请审核合并"
-              else
-                echo "✅ 依赖已同步到main分支"
-              fi
-            else
-              echo "✅ 执行成功，无依赖变更"
-            fi
-          fi
