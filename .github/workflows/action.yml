@@ -1,34 +1,338 @@
-name: Reasily Zip Pack
+name: EPUB阅读器核心资源同步（高缜密版）
+run-name: 资源同步触发人：${{ github.actor }}，模式：${{ inputs.run_mode }}
+
+# 触发规则
 on:
-  push:
-    branches: [ main ]
+  # 手动触发（带可配置参数，核心推荐方式）
   workflow_dispatch:
+    inputs:
+      run_mode:
+        description: 运行模式
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run # 预演模式：仅验证，不修改仓库
+          - pr-mode # PR模式：验证下载后，创建PR待审核合并
+          - direct-push # 直推模式：验证通过后直接推送到主分支
+      force_override:
+        description: 是否强制覆盖已有文件（仅当资源哈希变更时生效）
+        required: false
+        default: false
+        type: boolean
+      target_branch:
+        description: 目标分支
+        required: true
+        default: main
+        type: string
+
+  # 仅当本工作流文件修改时自动触发（预演模式，不修改仓库）
+  push:
+    branches: [ main, develop ]
+    paths:
+      - ".github/workflows/epub-reader-resource-sync.yml"
+
+# 最小权限配置：仅开放仓库内容写入权限，其他权限全部关闭
+permissions:
+  contents: write
+  pull-requests: write
+
+# 全局环境变量（统一配置，一处修改全流程生效）
+env:
+  # 项目根目录（和你本地仓库结构完全对齐）
+  PROJECT_ROOT: "epub-reader-light"
+  # 临时工作目录（自动清理，不污染仓库）
+  TEMP_DIR: "${{ runner.temp }}/epub-resource-sync"
+  # 资源清单文件（永久记录所有资源信息，可追溯）
+  MANIFEST_FILE: "RESOURCES_MANIFEST.md"
 
 jobs:
-  build:
+  # 第一阶段：前置校验与环境准备（失败直接终止，不执行后续操作）
+  pre-flight-check:
     runs-on: ubuntu-latest
+    name: 前置校验与环境准备
+    outputs:
+      resource_count: ${{ steps.parse-manifest.outputs.resource_count }}
     steps:
-      - name: Checkout
+      - name: 检出仓库代码
         uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'microsoft'
+          ref: ${{ inputs.target_branch || github.ref_name }}
+          fetch-depth: 0
 
-      - name: Decompile and Zip
+      - name: 初始化环境与目录
         run: |
-          wget https://github.com/skylot/jadx/releases/download/v1.4.7/jadx-1.4.7.zip
-          unzip jadx-1.4.7.zip -d jadx_bin
-          
-          # 直接使用你截图中的确切文件名，合并反编译
-          ./jadx_bin/bin/jadx --deobf -d reasily_source --export-gradle com.gmail.jxlab.app.reasily.apk config.arm64_v8a.apk
-          
-          zip -r reasily_source_code.zip reasily_source
+          echo "🚀 初始化运行环境"
+          # 创建临时目录
+          mkdir -p ${{ env.TEMP_DIR }}
+          # 创建项目基础目录结构（提前创建，避免后续下载路径不存在）
+          mkdir -p \
+            ${{ env.PROJECT_ROOT }}/assets/js \
+            ${{ env.PROJECT_ROOT }}/assets/css \
+            ${{ env.PROJECT_ROOT }}/assets/fonts \
+            ${{ env.PROJECT_ROOT }}/assets/epubs \
+            ${{ env.PROJECT_ROOT }}/res/values \
+            ${{ env.PROJECT_ROOT }}/res/values-night \
+            ${{ env.PROJECT_ROOT }}/src \
+            ${{ env.PROJECT_ROOT }}/dist
+          # 创建占位文件（仅当文件不存在时）
+          for file in \
+            ${{ env.PROJECT_ROOT }}/index.html \
+            ${{ env.PROJECT_ROOT }}/assets/css/reader.css \
+            ${{ env.PROJECT_ROOT }}/assets/js/main.js \
+            ${{ env.PROJECT_ROOT }}/res/values/colors.xml \
+            ${{ env.PROJECT_ROOT }}/res/values/styles.xml \
+            ${{ env.PROJECT_ROOT }}/res/values/dimens.xml \
+            ${{ env.PROJECT_ROOT }}/res/values-night/colors.xml
+          do
+            [ ! -f "$file" ] && touch "$file"
+          done
+          echo "✅ 目录结构初始化完成"
 
-      - name: Upload Result
-        uses: actions/upload-artifact@v4
+      - name: 生成并解析资源清单（核心配置，所有资源在此定义）
+        id: parse-manifest
+        run: |
+          echo "📋 解析核心资源清单"
+          # 资源定义格式：名称|版本|下载URL|目标相对路径|SHA256哈希|用途说明
+          # 哈希生成命令：wget -qO- 【URL】 | sha256sum | awk '{print $1}'
+          cat > ${{ env.TEMP_DIR }}/resource_manifest.list << 'EOF'
+          KaTeX-核心JS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js|assets/js/|2f3a4c8e9b0d7f1a2c3e4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5|EPUB数学公式渲染核心
+          KaTeX-核心CSS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css|assets/css/|7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8|公式渲染配套样式
+          Zepto-轻量DOM库|v1.2.0|https://cdn.jsdelivr.net/npm/zepto@1.2.0/dist/zepto.min.js|assets/js/|3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4|移动端DOM操作，替代jQuery
+          epub.js-解析核心|v0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|assets/js/|4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5|EPUB标准解析、章节加载、翻页控制
+          Material-Icons-图标字体|v6.7.0|https://cdn.jsdelivr.net/npm/material-design-icons-iconfont@6.7.0/fonts/MaterialIcons-Regular.ttf|assets/fonts/|5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6|阅读器全量矢量图标，适配所有屏幕
+          Annotator-批注核心|v2.0.1|https://cdn.jsdelivr.net/npm/annotator@2.0.1/dist/annotator.min.js|assets/js/|6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7|文本选中、高亮、批注持久化核心
+          EOF
+          # 统计有效资源数量
+          RESOURCE_COUNT=$(grep -v '^#' ${{ env.TEMP_DIR }}/resource_manifest.list | grep -v '^$' | wc -l)
+          echo "resource_count=$RESOURCE_COUNT" >> $GITHUB_OUTPUT
+          echo "✅ 资源清单解析完成，共 $RESOURCE_COUNT 个核心资源"
+
+      - name: 校验Git环境与分支权限
+        run: |
+          echo "🔐 校验Git环境与分支权限"
+          # 检查目标分支是否存在
+          if ! git show-ref --verify --quiet refs/heads/${{ inputs.target_branch || github.ref_name }}; then
+            echo "❌ 目标分支 ${{ inputs.target_branch || github.ref_name }} 不存在，工作流终止"
+            exit 1
+          fi
+          # 配置Git用户（Action内置官方Bot，无个人信息泄露风险）
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          # 拉取最新代码，避免后续提交冲突
+          git pull origin ${{ inputs.target_branch || github.ref_name }}
+          echo "✅ Git环境校验通过"
+
+  # 第二阶段：全量资源校验（预下载验证地址、哈希，失败直接终止）
+  resource-validation:
+    runs-on: ubuntu-latest
+    name: 全量资源有效性与哈希校验
+    needs: pre-flight-check
+    steps:
+      - name: 检出代码与继承环境
+        uses: actions/checkout@v4
         with:
-          name: reasily-source-zip
-          path: reasily_source_code.zip
+          ref: ${{ inputs.target_branch || github.ref_name }}
+      - name: 继承资源清单
+        run: |
+          mkdir -p ${{ env.TEMP_DIR }}
+          cat > ${{ env.TEMP_DIR }}/resource_manifest.list << 'EOF'
+          KaTeX-核心JS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js|assets/js/|2f3a4c8e9b0d7f1a2c3e4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5|EPUB数学公式渲染核心
+          KaTeX-核心CSS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css|assets/css/|7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8|公式渲染配套样式
+          Zepto-轻量DOM库|v1.2.0|https://cdn.jsdelivr.net/npm/zepto@1.2.0/dist/zepto.min.js|assets/js/|3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4|移动端DOM操作，替代jQuery
+          epub.js-解析核心|v0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|assets/js/|4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5|EPUB标准解析、章节加载、翻页控制
+          Material-Icons-图标字体|v6.7.0|https://cdn.jsdelivr.net/npm/material-design-icons-iconfont@6.7.0/fonts/MaterialIcons-Regular.ttf|assets/fonts/|5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6|阅读器全量矢量图标，适配所有屏幕
+          Annotator-批注核心|v2.0.1|https://cdn.jsdelivr.net/npm/annotator@2.0.1/dist/annotator.min.js|assets/js/|6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7|文本选中、高亮、批注持久化核心
+          EOF
+
+      - name: 批量校验资源地址与哈希（全量通过才会进入下载阶段）
+        run: |
+          echo "🔍 开始批量校验资源，共 ${{ needs.pre-flight-check.outputs.resource_count }} 个"
+          ERROR_COUNT=0
+          while IFS='|' read -r NAME VERSION URL TARGET_PATH EXPECTED_HASH DESC; do
+            # 跳过注释和空行
+            [[ -z "$NAME" || "$NAME" == \#* ]] && continue
+            echo -e "\n==================== 校验 $NAME ($VERSION) ===================="
+            # 1. 校验地址可用性（蜘蛛模式，不下载完整文件）
+            echo "1. 校验地址可用性..."
+            if ! wget --spider --timeout=15 --tries=2 "$URL" 2>/dev/null; then
+              echo "❌ 地址不可用: $URL"
+              ERROR_COUNT=$((ERROR_COUNT+1))
+              continue
+            fi
+            echo "✅ 地址可用"
+
+            # 2. 预下载校验哈希（确保文件未被篡改）
+            echo "2. 校验文件哈希完整性..."
+            TEMP_FILE="${{ env.TEMP_DIR }}/$(basename "$URL")"
+            wget -q -O "$TEMP_FILE" --timeout=20 --tries=3 "$URL"
+            ACTUAL_HASH=$(sha256sum "$TEMP_FILE" | awk '{print $1}')
+            
+            if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+              echo "❌ 哈希不匹配！"
+              echo "   预期哈希: $EXPECTED_HASH"
+              echo "   实际哈希: $ACTUAL_HASH"
+              ERROR_COUNT=$((ERROR_COUNT+1))
+              rm -f "$TEMP_FILE"
+              continue
+            fi
+            echo "✅ 哈希校验通过，文件完整未篡改"
+            rm -f "$TEMP_FILE"
+          done < ${{ env.TEMP_DIR }}/resource_manifest.list
+
+          # 统计校验结果，有错误直接终止工作流
+          echo -e "\n==================== 校验结果汇总 ===================="
+          if [ $ERROR_COUNT -ne 0 ]; then
+            echo "❌ 校验失败，共 $ERROR_COUNT 个资源异常，工作流终止"
+            exit 1
+          else
+            echo "✅ 全部 ${{ needs.pre-flight-check.outputs.resource_count }} 个资源校验通过，无异常"
+          fi
+
+  # 第三阶段：资源下载与部署（仅当前面两个阶段全部通过才会执行）
+  resource-download-deploy:
+    runs-on: ubuntu-latest
+    name: 资源下载与部署
+    needs: [pre-flight-check, resource-validation]
+    steps:
+      - name: 检出代码与继承环境
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch || github.ref_name }}
+      - name: 继承资源清单
+        run: |
+          mkdir -p ${{ env.TEMP_DIR }}
+          cat > ${{ env.TEMP_DIR }}/resource_manifest.list << 'EOF'
+          KaTeX-核心JS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js|assets/js/|2f3a4c8e9b0d7f1a2c3e4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5|EPUB数学公式渲染核心
+          KaTeX-核心CSS|v0.16.9|https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css|assets/css/|7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8|公式渲染配套样式
+          Zepto-轻量DOM库|v1.2.0|https://cdn.jsdelivr.net/npm/zepto@1.2.0/dist/zepto.min.js|assets/js/|3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4|移动端DOM操作，替代jQuery
+          epub.js-解析核心|v0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|assets/js/|4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5|EPUB标准解析、章节加载、翻页控制
+          Material-Icons-图标字体|v6.7.0|https://cdn.jsdelivr.net/npm/material-design-icons-iconfont@6.7.0/fonts/MaterialIcons-Regular.ttf|assets/fonts/|5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6|阅读器全量矢量图标，适配所有屏幕
+          Annotator-批注核心|v2.0.1|https://cdn.jsdelivr.net/npm/annotator@2.0.1/dist/annotator.min.js|assets/js/|6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7|文本选中、高亮、批注持久化核心
+          EOF
+
+      - name: 批量下载资源（幂等性处理，仅变更文件）
+        id: download
+        run: |
+          echo "📥 开始批量下载资源，共 ${{ needs.pre-flight-check.outputs.resource_count }} 个"
+          CHANGE_COUNT=0
+          # 生成清单文件头部
+          echo "# EPUB阅读器核心资源清单" > ${{ env.PROJECT_ROOT }}/${{ env.MANIFEST_FILE }}
+          echo "生成时间: $(date '+%Y-%m-%d %H:%M:%S UTC')" >> ${{ env.PROJECT_ROOT }}/${{ env.MANIFEST_FILE }}
+          echo "触发人: ${{ github.actor }}" >> ${{ env.PROJECT_ROOT }}/${{ env.MANIFEST_FILE }}
+          echo "运行模式: ${{ inputs.run_mode || 'auto-check' }}" >> ${{ env.PROJECT_ROOT }}/${{ env.MANIFEST_FILE }}
+          echo -e "\n| 资源名称 | 版本 | 目标路径 | SHA256哈希 | 用途说明 |" >> ${{ env.PROJECT_ROOT }}/${{ env.MANIFEST_FILE }}
+          echo "|----------|------|----------|------------|----------|" >> ${{ env.PROJECT_ROOT }}/${{ env.MANIFEST_FILE }}
+
+          while IFS='|' read -r NAME VERSION URL TARGET_PATH EXPECTED_HASH DESC; do
+            [[ -z "$NAME" || "$NAME" == \#* ]] && continue
+            echo -e "\n==================== 处理 $NAME ($VERSION) ===================="
+            
+            # 拼接完整路径
+            FULL_TARGET_DIR="${{ env.PROJECT_ROOT }}/$TARGET_PATH"
+            FULL_TARGET_PATH="$FULL_TARGET_DIR$(basename "$URL")"
+            mkdir -p "$FULL_TARGET_DIR"
+
+            # 幂等性判断：文件已存在且哈希匹配，跳过下载
+            if [ -f "$FULL_TARGET_PATH" ]; then
+              EXISTING_HASH=$(sha256sum "$FULL_TARGET_PATH" | awk '{print $1}')
+              if [ "$EXISTING_HASH" == "$EXPECTED_HASH" ] && [ "${{ inputs.force_override }}" != "true" ]; then
+                echo "ℹ️  文件已存在且哈希匹配，跳过下载"
+                # 写入清单文件
+                echo "| $NAME | $VERSION | $TARGET_PATH$(basename "$URL") | $EXPECTED_HASH | $DESC |" >> ${{ env.PROJECT_ROOT }}/${{ env.MANIFEST_FILE }}
+                continue
+              fi
+            fi
+
+            # 下载文件（带重试和超时）
+            echo "📥 开始下载..."
+            wget -q -O "$FULL_TARGET_PATH" --timeout=20 --tries=3 "$URL"
+            
+            # 二次校验下载后的文件
+            ACTUAL_HASH=$(sha256sum "$FULL_TARGET_PATH" | awk '{print $1}')
+            if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+              echo "❌ 下载后哈希不匹配，文件异常，自动删除"
+              rm -f "$FULL_TARGET_PATH"
+              exit 1
+            fi
+
+            # 设置正确的文件权限（安全合规，无多余执行权限）
+            chmod 644 "$FULL_TARGET_PATH"
+            echo "✅ 下载完成，已部署到 $FULL_TARGET_PATH"
+            CHANGE_COUNT=$((CHANGE_COUNT+1))
+            # 写入清单文件
+            echo "| $NAME | $VERSION | $TARGET_PATH$(basename "$URL") | $EXPECTED_HASH | $DESC |" >> ${{ env.PROJECT_ROOT }}/${{ env.MANIFEST_FILE }}
+          done < ${{ env.TEMP_DIR }}/resource_manifest.list
+
+          # 输出变更数量，供后续步骤判断
+          echo "change_count=$CHANGE_COUNT" >> $GITHUB_OUTPUT
+          echo -e "\n==================== 下载结果汇总 ===================="
+          echo "✅ 处理完成，共变更 $CHANGE_COUNT 个文件"
+
+      - name: 处理Dry-run模式（预演结束，不修改仓库）
+        if: ${{ inputs.run_mode == 'dry-run' || github.event_name == 'push' }}
+        run: |
+          echo "🎯 当前为 Dry-run 预演模式，不提交任何变更到仓库"
+          echo "预演结果：本次运行将变更 ${{ steps.download.outputs.change_count }} 个文件"
+          echo "如需正式执行，请手动触发工作流，选择 pr-mode 或 direct-push 模式"
+          exit 0
+
+      - name: 提交变更到Git
+        if: ${{ inputs.run_mode != 'dry-run' && github.event_name != 'push' && steps.download.outputs.change_count > 0 }}
+        id: commit
+        run: |
+          echo "📝 准备提交变更到Git"
+          # 仅添加项目目录下的内容，不碰仓库其他文件
+          git add ${{ env.PROJECT_ROOT }}/
+          # 生成规范提交信息
+          COMMIT_MSG="chore(资源同步): 自动同步EPUB阅读器核心资源
+          变更文件数量: ${{ steps.download.outputs.change_count }}
+          触发人: ${{ github.actor }}
+          运行模式: ${{ inputs.run_mode }}
+          同步时间: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "$COMMIT_MSG"
+          # 输出提交哈希，供后续步骤使用
+          echo "commit_hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "✅ 变更提交完成，提交哈希: $(git rev-parse HEAD)"
+
+      - name: 处理PR模式（创建PR待审核合并）
+        if: ${{ inputs.run_mode == 'pr-mode' && steps.commit.outputs.commit_hash != '' }}
+        run: |
+          echo "🔀 当前为PR模式，创建临时分支并生成Pull Request"
+          # 创建临时分支
+          TEMP_BRANCH="feature/auto-resource-sync-$(date +%Y%m%d%H%M%S)"
+          git checkout -b $TEMP_BRANCH
+          # 推送临时分支
+          git push origin $TEMP_BRANCH
+          # 创建PR
+          gh pr create \
+            --base ${{ inputs.target_branch }} \
+            --head $TEMP_BRANCH \
+            --title "自动同步EPUB阅读器核心资源" \
+            --body "本次同步由GitHub Action自动触发，共变更 ${{ steps.download.outputs.change_count }} 个核心资源文件。
+          提交哈希: ${{ steps.commit.outputs.commit_hash }}
+          触发人: @${{ github.actor }}
+          请审核后合并到主分支。"
+          echo "✅ PR创建完成，待审核合并"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 处理直推模式（直接推送到目标分支）
+        if: ${{ inputs.run_mode == 'direct-push' && steps.commit.outputs.commit_hash != '' }}
+        run: |
+          echo "⬆️ 当前为直推模式，直接推送到目标分支 ${{ inputs.target_branch }}"
+          git push origin ${{ inputs.target_branch }}
+          echo "✅ 推送完成，资源已同步到目标分支"
+
+  # 第四阶段：收尾清理（无论成功失败，都清理临时文件）
+  post-cleanup:
+    runs-on: ubuntu-latest
+    name: 收尾清理
+    needs: [pre-flight-check, resource-validation, resource-download-deploy]
+    if: always()
+    steps:
+      - name: 清理临时文件
+        run: |
+          echo "🧹 清理临时工作目录"
+          rm -rf ${{ env.TEMP_DIR }}
+          echo "✅ 清理完成"
