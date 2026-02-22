@@ -81,7 +81,7 @@ jobs:
 
           echo "===== 环境预校验全部通过 ====="
 
-      - name: 加载依赖配置（核心开源工具）
+      - name: 加载依赖配置（核心开源工具，哈希已修正）
         id: load-config
         run: |
           set -euo pipefail
@@ -90,7 +90,7 @@ jobs:
           # 依赖配置区：后续新增开源工具直接在这里加行
           # 格式：工具名|版本|下载直链|目标路径|SHA256哈希值
           cat > .deps_list << 'DEPS_EOF'
-          epub.js|0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|epub-reader-light/assets/js/epub.min.js|a97e536037a703a074f0a4d0e4c0d9b8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d
+          epub.js|0.3.93|https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js|epub-reader-light/assets/js/epub.min.js|06eae15745107b4aa508c95538275251f69bfb9f1175621fc458d9f42ed082d4
           DEPS_EOF
 
           grep -v '^#' .deps_list | grep -v '^$' > .valid_deps
@@ -160,6 +160,7 @@ jobs:
               echo "实际哈希：$ACTUAL_SHA"
               exit 1
             fi
+            echo "✅ 哈希校验通过"
 
             if [ "${{ inputs.dry_run }}" != "true" ]; then
               mv -f "$TMP_FILE" "$TARGET_PATH"
