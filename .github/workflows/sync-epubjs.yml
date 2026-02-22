@@ -24,7 +24,7 @@ on:
         required: false
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 defaults:
@@ -35,6 +35,11 @@ jobs:
   sync-epub-deps:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # 全局兜底默认值，解决push触发时inputs无值的问题
+      DRY_RUN: ${{ inputs.dry_run != '' && inputs.dry_run || true }}
+      CREATE_PR: ${{ inputs.create_pr != '' && inputs.create_pr || true }}
+      FORCE_UPDATE: ${{ inputs.force_update != '' && inputs.force_update || false }}
     steps:
       - name: 拉取项目代码
         uses: actions/checkout@v4
@@ -42,6 +47,15 @@ jobs:
           fetch-depth: 0
           clean: true
           token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: 打印执行参数（确认脚本正常启动）
+        run: |
+          echo "===== 工作流启动成功 ====="
+          echo "执行模式：$DRY_RUN"
+          echo "是否创建PR：$CREATE_PR"
+          echo "是否强制更新：$FORCE_UPDATE"
+          echo "触发方式：${{ github.event_name }}"
+          echo "============================"
 
       - name: 环境与目录预校验（适配APK构建目录结构）
         run: |
@@ -77,7 +91,7 @@ jobs:
           # Git环境标准化
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git pull origin main --rebase
+          git pull origin main --rebase || true
 
           echo "===== 环境预校验全部通过 ====="
 
@@ -94,7 +108,9 @@ jobs:
           DEPS_EOF
 
           grep -v '^#' .deps_list | grep -v '^$' > .valid_deps
-          echo "dep_count=$(wc -l < .valid_deps)" >> "$GITHUB_OUTPUT"
+          DEP_COUNT=$(wc -l < .valid_deps)
+          echo "dep_count=$DEP_COUNT" >> "$GITHUB_OUTPUT"
+          echo "✅ 加载依赖完成，共 $DEP_COUNT 个依赖"
 
       - name: 下载&校验开源依赖
         id: download-deps
@@ -110,12 +126,12 @@ jobs:
           echo "# 开源依赖同步变更日志" > "$CHANGE_LOG"
           echo "执行时间：$(date '+%Y-%m-%d %H:%M:%S')" >> "$CHANGE_LOG"
           echo "触发人：${{ github.actor }}" >> "$CHANGE_LOG"
+          echo "触发方式：${{ github.event_name }}" >> "$CHANGE_LOG"
           echo "" >> "$CHANGE_LOG"
           echo "| 工具名 | 版本 | 变更类型 | 目标路径 | 状态 |" >> "$CHANGE_LOG"
           echo "| ---- | ---- | ---- | ---- | ---- |" >> "$CHANGE_LOG"
 
           HAS_CHANGE=false
-          FORCE_UPDATE="${{ inputs.force_update || 'false' }}"
 
           while IFS='|' read -r NAME VERSION URL TARGET_PATH EXPECTED_SHA; do
             NAME=$(echo "$NAME" | xargs)
@@ -152,6 +168,7 @@ jobs:
               echo "❌ 文件异常，大小不足1KB"
               exit 1
             fi
+            echo "✅ 下载完成，文件大小：$FILE_SIZE 字节"
 
             ACTUAL_SHA=$(sha256sum "$TMP_FILE" | awk '{print $1}')
             if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
@@ -162,7 +179,7 @@ jobs:
             fi
             echo "✅ 哈希校验通过"
 
-            if [ "${{ inputs.dry_run }}" != "true" ]; then
+            if [ "$DRY_RUN" != "true" ]; then
               mv -f "$TMP_FILE" "$TARGET_PATH"
               echo "✅ 依赖写入完成：$TARGET_PATH"
             else
@@ -178,9 +195,10 @@ jobs:
           echo "has_change=$HAS_CHANGE" >> "$GITHUB_OUTPUT"
           echo "change_log_path=$CHANGE_LOG" >> "$GITHUB_OUTPUT"
           echo "tmp_dir=$TMP_DIR" >> "$GITHUB_OUTPUT"
+          echo "===== 依赖拉取处理完成 ====="
 
       - name: 预校验模式结果输出
-        if: inputs.dry_run == true
+        if: env.DRY_RUN == 'true'
         run: |
           set -euo pipefail
           echo "===== 预校验执行完成 ====="
@@ -191,7 +209,7 @@ jobs:
           cat "${{ steps.download-deps.outputs.change_log_path }}"
 
       - name: 创建变更分支
-        if: inputs.dry_run == false && steps.download-deps.outputs.has_change == 'true'
+        if: env.DRY_RUN == 'false' && steps.download-deps.outputs.has_change == 'true'
         id: create-branch
         run: |
           set -euo pipefail
@@ -201,9 +219,10 @@ jobs:
           git checkout -b "$BRANCH_NAME"
           git add epub-reader-light/assets/
           git commit -m "chore: 自动同步开源依赖 [$(date '+%Y-%m-%d %H:%M')]"
+          echo "✅ 变更分支创建完成：$BRANCH_NAME"
 
       - name: 创建PR供人工审核
-        if: inputs.dry_run == false && inputs.create_pr == true && steps.download-deps.outputs.has_change == 'true'
+        if: env.DRY_RUN == 'false' && env.CREATE_PR == 'true' && steps.download-deps.outputs.has_change == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
@@ -216,6 +235,15 @@ jobs:
             automated
           delete-branch: true
 
+      - name: 直接提交到main分支（不创建PR时）
+        if: env.DRY_RUN == 'false' && env.CREATE_PR == 'false' && steps.download-deps.outputs.has_change == 'true'
+        run: |
+          set -euo pipefail
+          git add epub-reader-light/assets/
+          git commit -m "chore: 自动同步开源依赖 [$(date '+%Y-%m-%d %H:%M')]"
+          git push origin main
+          echo "✅ 依赖已直接提交到main分支"
+
       - name: 清理临时文件
         if: always()
         run: |
@@ -225,13 +253,15 @@ jobs:
       - name: 最终执行结果
         run: |
           echo "===== 工作流执行完成 ====="
-          if [ "${{ inputs.dry_run }}" == "true" ]; then
-            echo "✅ 预校验模式执行成功"
+          if [ "$DRY_RUN" == "true" ]; then
+            echo "✅ 预校验模式执行成功，所有依赖校验通过"
           else
             if [ "${{ steps.download-deps.outputs.has_change }}" == "true" ]; then
               echo "✅ 正式模式执行成功"
-              if [ "${{ inputs.create_pr }}" == "true" ]; then
+              if [ "$CREATE_PR" == "true" ]; then
                 echo "✅ PR已创建，请审核合并"
+              else
+                echo "✅ 依赖已同步到main分支"
               fi
             else
               echo "✅ 执行成功，无依赖变更"
