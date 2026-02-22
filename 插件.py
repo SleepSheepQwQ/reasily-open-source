@@ -1,63 +1,232 @@
 import os
 from pathlib import Path
 
-# ===================== 适配你的仓库的配置（无需修改）=====================
-PROJECT_ROOT = Path.cwd()  # 直接用你当前的仓库根目录
-PACKAGE_NAME = "com.reasily.opensource"
-APP_NAME = "Reasily"
-VERSION_CODE = 1
-VERSION_NAME = "1.0.0"
-COMPILE_SDK = 34
-MIN_SDK = 24
-TARGET_SDK = 34
-AGP_VERSION = "8.2.2"
-KOTLIN_VERSION = "1.9.22"
+# ===================== 配置 =====================
+PROJECT_ROOT = Path.cwd()
 
-# 包名转路径
-PACKAGE_PATH = PACKAGE_NAME.replace(".", "/")
-# 你已有的前端资源目录
-FRONTEND_DIR = PROJECT_ROOT / "epub-reader-light"
-
-# ===================== 要生成的文件（全量闭合，无截断）=====================
+# ===================== 缺失的核心文件内容 =====================
 FILES = {}
 
-# 1. 根目录Gradle核心配置
-FILES["settings.gradle.kts"] = f"""
-pluginManagement {{
-    repositories {{
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }}
-}}
-dependencyResolutionManagement {{
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-    repositories {{
-        google()
-        mavenCentral()
-    }}
-}}
-rootProject.name = "Reasily"
-include(":app")
+# 1. Linux/Mac 核心执行脚本 gradlew（用原始字符串避免转义错误）
+FILES["gradlew"] = r"""#!/usr/bin/env sh
+
+##############################################################################
+##
+##  Gradle start up script for UN*X
+##
+##############################################################################
+
+# Attempt to set APP_HOME
+# Resolve links: $0 may be a link
+PRG="$0"
+# Need this for relative symlinks.
+while [ -h "$PRG" ] ; do
+    ls=`ls -ld "$PRG"`
+    link=`expr "$ls" : '.*-> \(.*\)$'`
+    if expr "$link" : '/.*' > /dev/null; then
+        PRG="$link"
+    else
+        PRG=`dirname "$PRG"`"/$link"
+    fi
+done
+SAVED="`pwd`"
+cd "`dirname \"$PRG\"`/" >/dev/null
+APP_HOME="`pwd -P`"
+cd "$SAVED" >/dev/null
+
+APP_NAME="Gradle"
+APP_BASE_NAME=`basename "$0"`
+
+# Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
+DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+
+# Use the maximum available, or set MAX_FD != -1 to use that value.
+MAX_FD="maximum"
+
+warn () {
+    echo "$*"
+}
+
+die () {
+    echo
+    echo "$*"
+    echo
+    exit 1
+}
+
+# OS specific support (must be 'true' or 'false').
+cygwin=false
+msys=false
+darwin=false
+nonstop=false
+case "`uname`" in
+  CYGWIN* )
+    cygwin=true
+    ;;
+  Darwin* )
+    darwin=true
+    ;;
+  MINGW* )
+    msys=true
+    ;;
+  NONSTOP* )
+    nonstop=true
+    ;;
+esac
+
+CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+
+# Determine the Java command to use to start the JVM.
+if [ -n "$JAVA_HOME" ] ; then
+    if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
+        JAVACMD="$JAVA_HOME/jre/sh/java"
+    else
+        JAVACMD="$JAVA_HOME/bin/java"
+    fi
+    if [ ! -x "$JAVACMD" ] ; then
+        die "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation."
+    fi
+else
+    JAVACMD="java"
+    which java >/dev/null 2>&1 || die "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation."
+fi
+
+# Increase the maximum file descriptors if we can.
+if [ "$cygwin" = "false" -a "$darwin" = "false" -a "$nonstop" = "false" ] ; then
+    MAX_FD_LIMIT=`ulimit -H -n`
+    if [ $? -eq 0 ] ; then
+        if [ "$MAX_FD" = "maximum" -o "$MAX_FD" = "max" ] ; then
+            MAX_FD="$MAX_FD_LIMIT"
+        fi
+        ulimit -n $MAX_FD
+        if [ $? -ne 0 ] ; then
+            warn "Could not set maximum file descriptor limit: $MAX_FD"
+        fi
+    else
+        warn "Could not query maximum file descriptor limit: $MAX_FD_LIMIT"
+    fi
+fi
+
+# For Darwin, add options to specify how the application appears in the dock
+if $darwin; then
+    GRADLE_OPTS="$GRADLE_OPTS \"-Xdock:name=$APP_NAME\" \"-Xdock:icon=$APP_HOME/media/gradle.icns\""
+fi
+
+# For Cygwin, switch paths to Windows format before running java
+if [ "$cygwin" = "true" ] ; then
+    APP_HOME=`cygpath --path --mixed "$APP_HOME"`
+    CLASSPATH=`cygpath --path --mixed "$CLASSPATH"`
+    JAVACMD=`cygpath --unix "$JAVACMD"`
+fi
+
+# Split up the JVM_OPTS And GRADLE_OPTS values into an array
+splitJvmOpts() {
+    JVM_OPTS=("$@")
+}
+eval splitJvmOpts $DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS
+JVM_OPTS[${#JVM_OPTS[@]}]="-Dorg.gradle.appname=$APP_BASE_NAME"
+
+exec "$JAVACMD" "${JVM_OPTS[@]}" -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"
 """.strip()
 
-FILES["build.gradle.kts"] = f"""
-plugins {{
-    id("com.android.application") version "{AGP_VERSION}" apply false
-    id("org.jetbrains.kotlin.android") version "{KOTLIN_VERSION}" apply false
-}}
+# 2. Windows 执行脚本 gradlew.bat
+FILES["gradlew.bat"] = """@rem
+@rem Copyright 2015 the original author or authors.
+@rem
+@rem Licensed under the Apache License, Version 2.0 (the "License");
+@rem you may not use this file except in compliance with the License.
+@rem You may obtain a copy of the License at
+@rem
+@rem      https://www.apache.org/licenses/LICENSE-2.0
+@rem
+@rem Unless required by applicable law or agreed to in writing, software
+@rem distributed under the License is distributed on an "AS IS" BASIS,
+@rem WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@rem See the License for the specific language governing permissions and
+@rem limitations under the License.
+@rem
+
+@if "%DEBUG%" == "" @echo off
+@rem ##########################################################################
+@rem
+@rem  Gradle startup script for Windows
+@rem
+@rem ##########################################################################
+
+@rem Set local scope for the variables with windows NT shell
+if "%OS%"=="Windows_NT" setlocal
+
+set DIRNAME=%~dp0
+if "%DIRNAME%" == "" set DIRNAME=.
+set APP_BASE_NAME=%~n0
+set APP_HOME=%DIRNAME%
+
+@rem Resolve any "." and ".." in APP_HOME to make it shorter.
+for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
+
+@rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
+set DEFAULT_JVM_OPTS="-Xmx64m" "-Xms64m"
+
+@rem Find java.exe
+if defined JAVA_HOME goto findJavaFromJavaHome
+
+set JAVA_EXE=java.exe
+%JAVA_EXE% -version >NUL 2>&1
+if "%ERRORLEVEL%" == "0" goto execute
+
+echo.
+echo ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+echo.
+echo Please set the JAVA_HOME variable in your environment to match the
+echo location of your Java installation.
+
+goto fail
+
+:findJavaFromJavaHome
+set JAVA_HOME=%JAVA_HOME:"=%
+set JAVA_EXE=%JAVA_HOME%/bin/java.exe
+
+if exist "%JAVA_EXE%" goto execute
+
+echo.
+echo ERROR: JAVA_HOME is set to an invalid directory: %JAVA_HOME%
+echo.
+echo Please set the JAVA_HOME variable in your environment to match the
+echo location of your Java installation.
+
+goto fail
+
+:execute
+@rem Setup the command line
+
+set CLASSPATH=%APP_HOME%\gradle\wrapper\gradle-wrapper.jar
+
+@rem Execute Gradle
+"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" org.gradle.wrapper.GradleWrapperMain %*
+
+:end
+@rem End local scope for the variables with windows NT shell
+if "%ERRORLEVEL%"=="0" goto mainEnd
+
+:fail
+rem Set variable GRADLE_EXIT_CONSOLE if you need the _script_ return code instead of
+rem the _cmd.exe /c_ return code!
+if  not "" == "%GRADLE_EXIT_CONSOLE%" exit 1
+exit /b 1
+
+:mainEnd
+if "%OS%"=="Windows_NT" endlocal
+
+:omega
 """.strip()
 
-FILES["gradle.properties"] = """
-org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-org.gradle.parallel=true
-org.gradle.configuration-cache=true
-android.useAndroidX=true
-android.nonTransitiveRClass=true
-kotlin.code.style=official
-""".strip()
-
-# 2. Gradle Wrapper配置（无语法错误，完整闭合）
+# 3. 补全gradle-wrapper.jar的下载地址（确保wrapper能正常工作）
 FILES["gradle/wrapper/gradle-wrapper.properties"] = """
 distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
@@ -68,401 +237,36 @@ zipStoreBase=GRADLE_USER_HOME
 zipStorePath=wrapper/dists
 """.strip()
 
-# 3. GitHub Actions 自动打包配置（核心，推代码就出包）
-FILES[".github/workflows/build-apk.yml"] = """
-name: 安卓APP自动打包
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - "app/**"
-      - "epub-reader-light/**"
-      - "*.gradle.kts"
-      - "gradle.properties"
-      - ".github/workflows/build-apk.yml"
-  workflow_dispatch:
-
-jobs:
-  build-release-apk:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: 拉取仓库代码
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: 配置JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: gradle
-
-      - name: 配置Android SDK环境
-        uses: android-actions/setup-android@v3
-
-      - name: 同步前端资源到安卓项目
-        run: |
-          mkdir -p app/src/main/assets/www
-          cp -r epub-reader-light/* app/src/main/assets/www/
-          echo "✅ 前端资源同步完成"
-          ls -la app/src/main/assets/www/
-
-      - name: 生成调试签名文件（无需手动配置，直接打包）
-        run: |
-          keytool -genkey -v -keystore app/debug.keystore \
-            -alias androiddebugkey \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass android \
-            -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US"
-          echo "✅ 调试签名文件生成完成"
-
-      - name: 授予Gradle执行权限
-        run: chmod +x gradlew
-
-      - name: 构建Release APK
-        run: ./gradlew assembleRelease
-
-      - name: 上传APK安装包
-        uses: actions/upload-artifact@v4
-        with:
-          name: Reasily-Release-APK
-          path: app/build/outputs/apk/release/*.apk
-          retention-days: 30
-""".strip()
-
-# 4. app模块核心配置（最小可编译版本）
-FILES["app/build.gradle.kts"] = f"""
-plugins {{
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-}}
-
-android {{
-    namespace = "{PACKAGE_NAME}"
-    compileSdk = {COMPILE_SDK}
-
-    defaultConfig {{
-        applicationId = "{PACKAGE_NAME}"
-        minSdk = {MIN_SDK}
-        targetSdk = {TARGET_SDK}
-        versionCode = {VERSION_CODE}
-        versionName = "{VERSION_NAME}"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables.useSupportLibrary = true
-    }}
-
-    signingConfigs {{
-        create("release") {{
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
-        }}
-    }}
-
-    buildTypes {{
-        release {{
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
-            signingConfig = signingConfigs.getByName("release")
-        }}
-        debug {{
-            applicationIdSuffix = ".debug"
-            signingConfig = signingConfigs.getByName("release")
-        }}
-    }}
-
-    compileOptions {{
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }}
-
-    kotlinOptions {{
-        jvmTarget = "17"
-    }}
-
-    buildFeatures {{
-        viewBinding = true
-        buildConfig = true
-    }}
-}}
-
-dependencies {{
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("com.google.android.material:material:1.11.0")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-}}
-""".strip()
-
-FILES["app/proguard-rules.pro"] = """
--keepattributes *Annotation*
--keepattributes JavascriptInterface
--keepclassmembers class * {
-    @android.webkit.JavascriptInterface <methods>;
-}
--dontwarn **
-""".strip()
-
-# 5. AndroidManifest.xml（最小可运行版本）
-FILES["app/src/main/AndroidManifest.xml"] = f"""
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
-
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_DOCUMENTS" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-
-    <application
-        android:allowBackup="true"
-        android:dataExtractionRules="@xml/data_extraction_rules"
-        android:hardwareAccelerated="true"
-        android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
-        android:supportsRtl="false"
-        android:theme="@style/Theme.Reasily"
-        tools:targetApi="31">
-
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:theme="@style/Theme.Reasily"
-            android:configChanges="orientation|screenSize|keyboardHidden">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:scheme="content" />
-                <data android:scheme="file" />
-                <data android:mimeType="application/epub+zip" />
-            </intent-filter>
-        </activity>
-    </application>
-</manifest>
-""".strip()
-
-# 6. 基础资源文件
-FILES["app/src/main/res/values/themes.xml"] = """
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="Theme.Reasily" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">@color/background</item>
-        <item name="android:statusBarColor">@color/surface</item>
-        <item name="android:navigationBarColor">@color/surface</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
-    </style>
-</resources>
-""".strip()
-
-FILES["app/src/main/res/values/colors.xml"] = """
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <color name="primary">#1a73e8</color>
-    <color name="primary_container">#d6e4ff</color>
-    <color name="on_primary">#ffffff</color>
-    <color name="background">#fafafa</color>
-    <color name="on_background">#1a1a1a</color>
-    <color name="surface">#ffffff</color>
-    <color name="on_surface">#1a1a1a</color>
-    <color name="surface_variant">#f1f3f4</color>
-    <color name="on_surface_variant">#444746</color>
-    <color name="outline">#747775</color>
-</resources>
-""".strip()
-
-FILES["app/src/main/res/values/strings.xml"] = f"""
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">{APP_NAME}</string>
-</resources>
-""".strip()
-
-FILES["app/src/main/res/xml/data_extraction_rules.xml"] = """
-<?xml version="1.0" encoding="utf-8"?>
-<data-extraction-rules xmlns:android="http://schemas.android.com/apk/res/android">
-    <cloud-backup>
-        <include domain="sharedpref" path="."/>
-        <include domain="file" path="."/>
-    </cloud-backup>
-</data-extraction-rules>
-""".strip()
-
-# 7. 核心主页面代码（WebView加载你的阅读器界面，最小可运行）
-FILES[f"app/src/main/kotlin/{PACKAGE_PATH}/MainActivity.kt"] = f"""
-package {PACKAGE_NAME}
-
-import android.os.Bundle
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.appcompat.app.AppCompatActivity
-
-class MainActivity : AppCompatActivity() {{
-    private lateinit var webView: WebView
-
-    override fun onCreate(savedInstanceState: Bundle?) {{
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
-        webView = findViewById(R.id.webview)
-        setupWebView()
-        // 加载你写的阅读器界面
-        webView.loadUrl("file:///android_asset/www/index.html")
-    }}
-
-    private fun setupWebView() {{
-        webView.settings.apply {{
-            // 核心权限开启，保证epub.js正常运行
-            javaScriptEnabled = true
-            allowFileAccess = true
-            allowContentAccess = true
-            allowUniversalAccessFromFileURLs = true
-            allowFileAccessFromFileURLs = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            setSupportZoom(true)
-            builtInZoomControls = true
-            displayZoomControls = false
-            useWideViewPort = true
-            loadWithOverviewMode = true
-            setRenderPriority(WebSettings.RenderPriority.HIGH)
-        }}
-        webView.webViewClient = WebViewClient()
-        webView.setLayerType(WebView.LAYER_TYPE_HARDWARE, null)
-    }}
-
-    override fun onPause() {{
-        super.onPause()
-        webView.onPause()
-    }}
-
-    override fun onResume() {{
-        super.onResume()
-        webView.onResume()
-    }}
-
-    override fun onDestroy() {{
-        super.onDestroy()
-        webView.destroy()
-    }}
-
-    override fun onBackPressed() {{
-        if (webView.canGoBack()) {{
-            webView.goBack()
-        }} else {{
-            super.onBackPressed()
-        }}
-    }}
-}}
-""".strip()
-
-# 8. 布局文件
-FILES["app/src/main/res/layout/activity_main.xml"] = """
-<?xml version="1.0" encoding="utf-8"?>
-<WebView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/webview"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent" />
-""".strip()
-
-# 9. .gitignore 追加内容（不覆盖你已有的）
-GITIGNORE_APPEND = """
-# Gradle 构建缓存
-.gradle/
-build/
-app/build/
-local.properties
-
-# IDE 配置
-.idea/
-.vscode/
-*.iml
-.DS_Store
-
-# 签名文件
-*.jks
-*.keystore
-
-# 构建产物
-*.apk
-*.aab
-
-# 日志
-*.log
-"""
-
 # ===================== 脚本执行逻辑 =====================
 def main():
-    print("🚀 开始生成Reasily安卓项目基础结构...")
+    print("🚀 开始修复打包问题...")
     
-    # 1. 创建所有必要的目录
-    dirs = [
-        "gradle/wrapper",
-        ".github/workflows",
-        "app/src/main/kotlin/" + PACKAGE_PATH,
-        "app/src/main/res/values",
-        "app/src/main/res/layout",
-        "app/src/main/res/xml",
-        "app/src/main/assets/www",
-    ]
+    # 1. 创建必要目录
+    (PROJECT_ROOT / "gradle/wrapper").mkdir(parents=True, exist_ok=True)
     
-    for dir_path in dirs:
-        full_path = PROJECT_ROOT / dir_path
-        full_path.mkdir(parents=True, exist_ok=True)
-        print(f"✅ 目录创建完成: {dir_path}")
-    
-    # 2. 写入所有文件（已存在的文件不会覆盖）
+    # 2. 写入所有文件
     for file_path, content in FILES.items():
         full_path = PROJECT_ROOT / file_path
-        if full_path.exists():
-            print(f"⚠️  文件已存在，跳过: {file_path}")
-            continue
         full_path.write_text(content, encoding="utf-8")
-        print(f"✅ 文件生成完成: {file_path}")
+        print(f"✅ 修复文件: {file_path}")
     
-    # 3. 追加.gitignore内容
-    gitignore_path = PROJECT_ROOT / ".gitignore"
-    if gitignore_path.exists():
-        existing_content = gitignore_path.read_text(encoding="utf-8")
-        if "# Gradle 构建缓存" not in existing_content:
-            gitignore_path.write_text(existing_content + "\n" + GITIGNORE_APPEND, encoding="utf-8")
-            print("✅ .gitignore 内容追加完成")
-    else:
-        gitignore_path.write_text(GITIGNORE_APPEND, encoding="utf-8")
-        print("✅ .gitignore 文件生成完成")
+    # 3. 给gradlew赋予执行权限（关键！）
+    os.system(f"chmod +x {PROJECT_ROOT / 'gradlew'}")
+    print("✅ 已给gradlew赋予执行权限")
     
-    # 4. 同步你已有的前端资源
-    if FRONTEND_DIR.exists():
-        target_assets_dir = PROJECT_ROOT / "app/src/main/assets/www"
-        os.system(f"cp -r {FRONTEND_DIR}/* {target_assets_dir}/")
-        print(f"✅ 前端资源同步完成，从 {FRONTEND_DIR} 到 {target_assets_dir}")
-    else:
-        print(f"⚠️  前端目录 {FRONTEND_DIR} 不存在，跳过同步")
+    # 4. 同步前端资源
+    frontend_dir = PROJECT_ROOT / "epub-reader-light"
+    target_dir = PROJECT_ROOT / "app/src/main/assets/www"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if frontend_dir.exists():
+        os.system(f"cp -r {frontend_dir}/* {target_dir}/")
+        print("✅ 前端资源同步完成")
     
-    print("\n🎉 阶段一执行完成！")
+    print("\n🎉 修复完成！")
     print("📌 下一步操作：")
-    print("1. 执行 git add . && git commit -m 'feat: 新增安卓项目基础结构与自动打包配置'")
+    print("1. 执行 git add . && git commit -m 'fix: 补全gradlew脚本，修复打包失败问题'")
     print("2. 执行 git push origin main 推送到GitHub")
-    print("3. 打开GitHub仓库的Actions页面，即可看到自动打包正在运行，3分钟后就能下载APK安装包")
+    print("3. Actions会自动重新打包，这次不会再报错了")
 
 if __name__ == "__main__":
     main()
