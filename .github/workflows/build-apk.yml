@@ -1,0 +1,56 @@
+name: 安卓APP自动打包
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "app/**"
+      - "epub-reader-light/**"
+      - "*.gradle.kts"
+      - "gradle.properties"
+      - ".github/workflows/build-apk.yml"
+  workflow_dispatch:
+
+jobs:
+  build-release-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配置JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: 配置Android SDK环境
+        uses: android-actions/setup-android@v3
+
+      - name: 同步前端资源到安卓项目
+        run: |
+          mkdir -p app/src/main/assets/www
+          cp -r epub-reader-light/* app/src/main/assets/www/
+          echo "✅ 前端资源同步完成"
+          ls -la app/src/main/assets/www/
+
+      - name: 生成调试签名文件（无需手动配置，直接打包）
+        run: |
+          keytool -genkey -v -keystore app/debug.keystore             -alias androiddebugkey             -keyalg RSA             -keysize 2048             -validity 10000             -storepass android             -keypass android             -dname "CN=Android Debug,O=Android,C=US"
+          echo "✅ 调试签名文件生成完成"
+
+      - name: 授予Gradle执行权限
+        run: chmod +x gradlew
+
+      - name: 构建Release APK
+        run: ./gradlew assembleRelease
+
+      - name: 上传APK安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reasily-Release-APK
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
