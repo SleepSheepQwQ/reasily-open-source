@@ -11,51 +11,55 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      # 1. 检出代码（包含我们刚生成的完整gradlew）
+      # 1. 检出代码（只有安卓项目结构，无损坏的gradle文件）
       - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      # 2. 配置JDK环境
+      # 2. 配置JDK环境（官方标准）
       - name: 配置JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      # 3. Gradle官方Action：自动处理缓存、版本匹配，无需手动安装
-      - name: 配置Gradle缓存
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: false
+      # 3. 【核心修复】云端安装官方Gradle，自动生成无语法错误的wrapper
+      - name: 安装官方Gradle并生成Wrapper
+        run: |
+          # 安装官方指定版本Gradle
+          wget -q https://services.gradle.org/distributions/gradle-8.2-bin.zip
+          unzip -q gradle-8.2-bin.zip
+          sudo mv gradle-8.2 /opt/gradle
+          sudo ln -sf /opt/gradle/bin/gradle /usr/bin/gradle
+          # 自动生成官方原版wrapper，绝对无语法错误
+          gradle wrapper --gradle-version 8.2
+          # 验证权限和语法
+          chmod +x gradlew
+          bash -n gradlew
+          echo "✅ 官方gradlew生成完成，语法验证通过"
+          gradlew -v
 
-      # 4. 授予gradlew执行权限（关键，避免云端权限不足）
-      - name: 授予Gradle执行权限
-        run: chmod +x gradlew
-
-      # 5. 生成调试签名文件
+      # 4. 生成调试签名文件
       - name: 生成签名文件
         run: |
           keytool -genkey -v -keystore app/debug.keystore \
             -alias androiddebugkey -keyalg RSA -keysize 2048 \
             -validity 10000 -storepass android -keypass android \
             -dname "CN=Android Debug,O=Android,C=US" -noprompt
-          echo "✅ 签名文件生成完成"
 
-      # 6. 同步前端阅读器资源
+      # 5. 同步你的前端阅读器资源
       - name: 同步前端资源
         run: |
           mkdir -p app/src/main/assets/www
           if [ -d "epub-reader-light" ]; then
             cp -r epub-reader-light/* app/src/main/assets/www/
             echo "✅ 前端资源同步完成"
-            ls -la app/src/main/assets/www/
           fi
 
-      # 7. 构建Release APK（带完整日志）
+      # 6. 构建Release APK（官方标准命令）
       - name: 构建Release安装包
-        run: ./gradlew assembleRelease --info --stacktrace
+        run: ./gradlew assembleRelease --stacktrace --no-daemon
 
-      # 8. 上传APK产物
+      # 7. 上传APK产物
       - name: 上传Release APK
         uses: actions/upload-artifact@v4
         with:
@@ -63,7 +67,7 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      # 9. 失败时上传完整日志
+      # 8. 失败时上传完整日志
       - name: 上传构建失败日志
         if: failure()
         uses: actions/upload-artifact@v4
