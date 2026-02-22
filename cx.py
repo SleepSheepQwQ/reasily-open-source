@@ -48,4 +48,4 @@ if __name__ == "__main__":
     print("🚀 开始下载开源资源到 EPUB 阅读器项目...\n")
     for res in RESOURCES:
         download_resource(res["name"], res["url"], res["target"])
-    print("\n🎉 所有资源下载完成！")
+    print("\n🎉 所有资源下载完成！")。
