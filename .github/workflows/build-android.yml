@@ -9,37 +9,28 @@ permissions:
 jobs:
   build-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
-      - name: 检出代码
+      # 1. 检出代码（官方标准Action）
+      - name: 检出仓库代码
         uses: actions/checkout@v4
 
+      # 2. 配置JDK环境（官方标准Action）
       - name: 配置JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      # 【核心修复】用gradle官方脚本安装指定版本，彻底避免版本不兼容
-      - name: 安装Gradle 8.2官方版本
-        run: |
-          wget https://services.gradle.org/distributions/gradle-8.2-bin.zip
-          unzip -q gradle-8.2-bin.zip
-          sudo mv gradle-8.2 /opt/gradle
-          sudo ln -s /opt/gradle/bin/gradle /usr/bin/gradle
-          gradle -v
-          echo "✅ Gradle安装完成"
+      # 【核心修复】Gradle官方标准Action，自动处理环境、版本、缓存，彻底避免手动安装错误
+      - name: 配置Gradle环境
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.2'
+          cache-read-only: false
 
-      # 生成官方原版wrapper，无语法错误
-      - name: 生成Gradle Wrapper
-        run: |
-          gradle wrapper --gradle-version 8.2
-          chmod +x gradlew
-          bash -n gradlew
-          echo "✅ Wrapper生成完成，语法验证通过"
-
-      # 生成签名文件
-      - name: 生成调试签名文件
+      # 3. 生成调试签名文件（自动生成，无需手动配置）
+      - name: 生成签名文件
         run: |
           keytool -genkey -v -keystore app/debug.keystore \
             -alias androiddebugkey -keyalg RSA -keysize 2048 \
@@ -47,8 +38,8 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US" -noprompt
           echo "✅ 签名文件生成完成"
 
-      # 同步前端资源
-      - name: 同步前端阅读器资源
+      # 4. 同步你的前端阅读器界面到安卓项目
+      - name: 同步前端资源
         run: |
           mkdir -p app/src/main/assets/www
           if [ -d "epub-reader-light" ]; then
@@ -59,11 +50,11 @@ jobs:
             echo "⚠️  前端目录不存在，跳过同步"
           fi
 
-      # 【关键】构建时输出完整日志，出错直接看到核心原因
-      - name: 构建Release APK
-        run: ./gradlew assembleRelease --info --stacktrace --no-daemon
+      # 5. 构建Release APK（带完整日志，出错可定位）
+      - name: 构建Release安装包
+        run: ./gradlew assembleRelease --info --stacktrace
 
-      # 上传APK
+      # 6. 上传可安装的APK产物
       - name: 上传Release APK
         uses: actions/upload-artifact@v4
         with:
@@ -71,12 +62,12 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      # 失败时上传完整日志
-      - name: 上传完整构建日志
+      # 7. 失败时上传完整日志，方便排查
+      - name: 上传构建失败日志
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-full-logs
+          name: build-error-logs
           path: |
             **/build/reports/
             **/build/outputs/logs/
