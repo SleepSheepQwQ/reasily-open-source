@@ -1,5 +1,5 @@
 name: 审慎高容错-开源依赖同步工作流
-run-name: 依赖同步 ${{ inputs.dry_run && '【预校验预览】' || '【正式执行】' }} | 触发人: ${{ github.actor }}
+run-name: 依赖同步 ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run && '【预校验预览】' || '【正式执行】') || '【代码推送】' }} | 触发人: ${{ github.actor }}
 
 on:
   push:
@@ -25,7 +25,7 @@ on:
         required: false
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 defaults:
