@@ -1,114 +1,97 @@
-name: Reasley安卓APP构建
+# 谨慎版 Android 构建 Workflow - 完全适配 GitHub 官方托管环境
+name: Android Cautious Build
+
+# 明确触发规则，避免无意义触发，可根据自身需求修改
 on:
   push:
-    branches: [ main ]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - '.gitignore'
-  workflow_dispatch:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+# 最小权限原则：仅授予代码读取权限，无任何多余权限
 permissions:
   contents: read
 
-env:
-  GRADLE_VERSION: 8.2
-  JDK_VERSION: 17
-  KEYSTORE_PATH: app/debug.keystore
-  KEYSTORE_ALIAS: androiddebugkey
-  KEYSTORE_PASSWORD: android
-
+# 固定运行环境，禁用滚动更新的 latest，避免环境突变
 jobs:
-  build-release-apk:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  android-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30 # 全局超时兜底，避免卡死占用资源
     steps:
-      - name: 检出代码
+      # 步骤1：拉取代码 - 官方原生Action，固定稳定版本，无第三方风险
+      - name: Checkout Code
         uses: actions/checkout@v4
+        timeout-minutes: 5
         with:
-          clean: true
-          fetch-depth: 1
+          fetch-depth: 1 # 仅拉取当前提交，减少IO开销，加快速度
 
-      - name: 配置JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ env.JDK_VERSION }}
-          distribution: 'temurin'
-          cache: 'gradle'
-
-      - name: 清理与校验项目结构
+      # 步骤2：前置环境校验 - 提前排查问题，避免无效构建
+      - name: Pre-build Environment Check
+        timeout-minutes: 3
         run: |
-          set -euo pipefail
-          rm -rf gradle/ gradlew gradlew.bat gradle.zip gradle-${{ env.GRADLE_VERSION }}
-          rm -rf app/build/ build/ .gradle/
-          if [ ! -d "app" ]; then
-            echo "错误：app 目录不存在"
+          echo "===== 系统硬件信息校验 ====="
+          echo "CPU核心数: $(nproc)"
+          echo "可用内存: $(free -h | grep Mem | awk '{print $7}')"
+          echo "===== 项目文件校验 ====="
+          if [ ! -f "gradlew" ]; then
+            echo "❌ 错误：项目根目录未找到 gradlew 文件"
             exit 1
           fi
-        shell: bash
-
-      - name: 下载 Gradle 8.2
-        run: |
-          set -euo pipefail
-          curl -sL --retry 3 --max-time 120 --fail \
-            https://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip \
-            -o gradle.zip
-          unzip -q gradle.zip
-        shell: bash
-
-      - name: 生成官方 Gradle Wrapper
-        run: |
-          set -euo pipefail
-          gradle-${{ env.GRADLE_VERSION }}/bin/gradle wrapper --gradle-version ${{ env.GRADLE_VERSION }} --distribution-type bin --no-daemon
-          chmod +x gradlew
-          bash -n gradlew
-          ./gradlew -v --no-daemon
-        shell: bash
-
-      - name: 生成调试签名
-        run: |
-          set -euo pipefail
-          mkdir -p app
-          if [ ! -f "${{ env.KEYSTORE_PATH }}" ]; then
-            keytool -genkey -v \
-              -keystore ${{ env.KEYSTORE_PATH }} \
-              -alias ${{ env.KEYSTORE_ALIAS }} \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass ${{ env.KEYSTORE_PASSWORD }} \
-              -keypass ${{ env.KEYSTORE_PASSWORD }} \
-              -dname "CN=Android Debug,O=Android,C=US" -noprompt
+          chmod +x gradlew # 兜底执行权限，解决Windows提交导致的权限丢失问题
+          echo "✅ gradlew 权限已配置"
+          echo "===== 官方Android环境校验 ====="
+          echo "ANDROID_HOME 路径: $ANDROID_HOME"
+          if [ -d "$ANDROID_HOME" ]; then
+            echo "✅ Android SDK 环境正常"
+          else
+            echo "❌ 错误：Android SDK 环境不存在"
+            exit 1
           fi
-        shell: bash
 
-      - name: 同步前端资源
-        run: |
-          set -euo pipefail
-          mkdir -p app/src/main/assets/www
-          if [ -d "epub-reader-light" ]; then
-            cp -rf epub-reader-light/* app/src/main/assets/www/
-          fi
-        shell: bash
-
-      - name: 构建 Release APK
-        run: |
-          set -euo pipefail
-          export GRADLE_OPTS="-Xmx1g -XX:MaxMetaspaceSize=512m"
-          ./gradlew assembleRelease --no-daemon --stacktrace
-        shell: bash
-
-      - name: 上传 APK
-        uses: actions/upload-artifact@v4
-        if: success()
+      # 步骤3：JDK环境配置 - 官方原生Action，固定LTS版本，无第三方风险
+      - name: Set Up JDK 17
+        uses: actions/setup-java@v4
+        timeout-minutes: 5
         with:
-          name: Reasley-Release-APK
-          path: app/build/outputs/apk/release/*.apk
-          retention-days: 30
+          java-version: 17.0.10+7 # 固定小版本，彻底避免JDK版本变动带来的兼容性问题
+          distribution: temurin # 官方推荐的Adoptium开源JDK，兼容性最强
+          cache: gradle # 官方原生缓存，无第三方风险
 
-      - name: 上传失败日志
+      # 步骤4：Gradle构建预校验 - 确认Gradle环境正常，提前暴露配置问题
+      - name: Gradle Environment Pre-check
+        timeout-minutes: 5
+        run: |
+          ./gradlew --version
+          echo "✅ Gradle 环境校验通过"
+
+      # 步骤5：核心构建 - 极简原生指令，保守参数适配官方硬件，零黑魔法
+      - name: Build Android Project
+        timeout-minutes: 20
+        run: |
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --no-configuration-cache \
+            --max-workers=4 \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError" \
+            --stacktrace \
+            --info
+        env:
+          # 禁用Gradle守护进程，CI一次性环境无需守护，减少内存占用
+          ORG_GRADLE_DAEMON: false
+          # 关闭多余的构建特性，降低内存开销
+          ORG_GRADLE_PARALLEL: true
+          ORG_GRADLE_CONFIGURATION_ON_DEMAND: false
+
+      # 步骤6：构建产物归档 - 官方原生Action，方便下载验证，兜底排查问题
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
-        if: failure()
+        if: success() || failure() # 无论构建成功失败，都上传产物/日志，方便定位
+        timeout-minutes: 5
         with:
-          name: build-logs
+          name: android-build-output
           path: |
+            app/build/outputs/
             **/build/reports/
-            **/build/outputs/logs/
-          retention-days: 30
+            **/hs_err_pid*.log
+            **/java_pid*.hprof
+          retention-days: 7
