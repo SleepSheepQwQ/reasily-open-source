@@ -2,54 +2,49 @@ name: Reasley安卓APP构建
 on:
   push:
     branches: [ main ]
-    # 避免非代码修改触发构建，可根据需要删除
     paths-ignore:
       - '**.md'
       - 'LICENSE'
       - '.gitignore'
-  workflow_dispatch: # 保留手动触发
+  workflow_dispatch:
 permissions:
   contents: read
   packages: read
-# 全局版本统一管理，修改一处全量生效
+
+# 全局版本统一管理，一处修改全量生效
 env:
   GRADLE_VERSION: 8.2
   JDK_VERSION: 17
   ANDROID_COMPILE_SDK: 34
   ANDROID_BUILD_TOOLS: 34.0.0
-  ANDROID_TARGET_SDK: 34
-  ANDROID_MIN_SDK: 21
   KEYSTORE_PATH: app/debug.keystore
   KEYSTORE_ALIAS: androiddebugkey
   KEYSTORE_PASSWORD: android
+
 jobs:
   build-release-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 25 # 合理超时，避免卡死占用资源
-    # 步骤级失败重试，网络波动等偶发问题自动重试
-    strategy:
-      fail-fast: false
-      max-parallel: 1
+    timeout-minutes: 30
     steps:
-      # 1. 检出代码，强制清理工作目录，避免残留文件干扰
-      - name: 🔍 检出仓库代码
+      # 1. 检出代码，官方标准写法，强制清理工作目录
+      - name: 检出仓库代码
         uses: actions/checkout@v4
         with:
           clean: true
           fetch-depth: 1
         timeout-minutes: 2
 
-      # 2. 配置JDK 17（Gradle 8.2 官方强制要求的最低兼容版本）
-      - name: ☕ 配置JDK 17环境
+      # 2. 配置JDK 17，Gradle 8.2 官方强制兼容版本，开启官方缓存
+      - name: 配置JDK 17环境
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JDK_VERSION }}
           distribution: 'temurin'
-          cache: 'gradle' # 自动缓存Gradle依赖、wrapper，大幅提速+降低网络失败率
+          cache: 'gradle'
         timeout-minutes: 5
 
-      # 3. 配置Android SDK（之前缺失的核心步骤，AGP构建必须依赖）
-      - name: 🤖 配置Android官方构建环境
+      # 3. 配置Android SDK，AGP构建必需依赖，官方标准Action
+      - name: 配置Android构建环境
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: 11076708
@@ -59,49 +54,66 @@ jobs:
             platform-tools
         timeout-minutes: 5
 
-      # 4. 预校验+清理旧文件，避免历史残留导致冲突
-      - name: 🧹 清理历史残留文件
+      # 4. 预校验项目结构+清理历史残留，提前暴露问题，避免构建中途失败
+      - name: 环境清理与项目预校验
         run: |
           set -euo pipefail
-          # 强制删除旧的wrapper/gradle文件，确保生成全新官方版本
+          # 强制删除旧文件，避免残留冲突
           rm -rf gradle/ gradlew gradlew.bat gradle.zip gradle-${{ env.GRADLE_VERSION }}
-          # 清理旧构建缓存，避免缓存污染
           rm -rf app/build/ build/ .gradle/
-          # 预校验app目录是否存在，提前暴露项目结构问题
+          # 核心目录预校验，不存在直接报错
           if [ ! -d "app" ]; then
-            echo "❌ 错误：app项目目录不存在，请确认仓库结构正确"
+            echo "错误：app项目目录不存在，请确认仓库结构正确"
             exit 1
           fi
-          echo "✅ 环境清理完成，项目结构校验通过"
+          if [ ! -f "app/build.gradle" ] && [ ! -f "app/build.gradle.kts" ]; then
+            echo "错误：app/build.gradle 配置文件不存在"
+            exit 1
+          fi
+          echo "环境清理完成，项目结构校验通过"
+        shell: bash
         timeout-minutes: 1
 
-      # 5. 下载官方Gradle 8.2，加多重校验+重试，彻底解决下载失败/文件损坏问题
-      - name: 📦 下载官方Gradle 8.2完整包
+      # 5. 下载官方Gradle安装包，加多重校验+原生重试，避免网络波动失败
+      - name: 下载官方Gradle安装包
         run: |
           set -euo pipefail
-          # 5次重试+失败立即退出+超时控制，避免网络波动导致失败
-          curl -sL \
-            --retry 5 \
-            --retry-delay 10 \
-            --max-time 120 \
-            --fail \
-            --show-error \
-            https://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip \
-            -o gradle.zip
-          
-          # 校验zip文件完整性，损坏直接报错退出
-          if ! unzip -tqq gradle.zip; then
-            echo "❌ 错误：Gradle安装包损坏，下载失败"
+          # 原生shell重试逻辑，替代不兼容的retry字段
+          MAX_RETRY=5
+          RETRY_DELAY=10
+          COUNT=0
+          SUCCESS=0
+          while [ $COUNT -lt $MAX_RETRY ]; do
+            COUNT=$((COUNT+1))
+            echo "第 $COUNT 次尝试下载Gradle ${{ env.GRADLE_VERSION }}"
+            if curl -sL \
+              --retry 2 \
+              --max-time 120 \
+              --fail \
+              --show-error \
+              https://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip \
+              -o gradle.zip; then
+              # 校验zip文件完整性
+              if unzip -tqq gradle.zip; then
+                SUCCESS=1
+                break
+              fi
+            fi
+            echo "下载失败，$RETRY_DELAY 秒后重试"
+            sleep $RETRY_DELAY
+          done
+          if [ $SUCCESS -ne 1 ]; then
+            echo "错误：Gradle安装包下载失败，已达最大重试次数"
             exit 1
           fi
-          
-          # 静默解压，不输出冗余日志
+          # 解压安装包
           unzip -q gradle.zip
-          echo "✅ 官方Gradle ${{ env.GRADLE_VERSION }} 下载校验完成"
+          echo "官方Gradle ${{ env.GRADLE_VERSION }} 下载校验完成"
+        shell: bash
         timeout-minutes: 10
 
-      # 6. 生成官方标准Gradle Wrapper，多重校验确保零错误
-      - name: 🔧 生成官方标准Gradle Wrapper
+      # 6. 生成官方标准Gradle Wrapper，全量校验，彻底解决command not found问题
+      - name: 生成官方Gradle Wrapper
         run: |
           set -euo pipefail
           # 用官方gradle命令生成wrapper，严格匹配版本
@@ -110,51 +122,50 @@ jobs:
             --distribution-type bin \
             --no-daemon
           
-          # 强制给执行权限，彻底解决command not found问题
+          # 强制赋予执行权限，彻底解决权限问题
           chmod +x gradlew gradlew.bat
           
           # shell语法校验，提前发现换行符/转义错误
           if ! bash -n gradlew; then
-            echo "❌ 错误：gradlew脚本语法校验失败"
+            echo "错误：gradlew脚本语法校验失败"
             exit 1
           fi
           
-          # 校验wrapper配置是否正确
+          # 校验wrapper版本配置
           if ! grep -q "gradle-${{ env.GRADLE_VERSION }}-bin.zip" gradle/wrapper/gradle-wrapper.properties; then
-            echo "❌ 错误：wrapper版本配置异常"
+            echo "错误：wrapper版本配置异常"
             exit 1
           fi
           
-          # 最终验证wrapper是否正常工作，这步过不了后面构建必败
+          # 最终验证wrapper可用性
           ./gradlew -v --no-daemon
-          echo "✅ 官方gradlew生成完成，全量校验通过"
+          echo "官方gradlew生成完成，全量校验通过"
+        shell: bash
         timeout-minutes: 5
 
-      # 7. 预下载全量依赖，提前解决网络问题，避免构建中途失败
-      - name: 📥 预下载项目全量依赖
+      # 7. 预下载项目依赖，提前解决网络问题，避免构建中途中断
+      - name: 预下载项目依赖
         run: |
           set -euo pipefail
-          # CI环境JVM内存优化，彻底解决OOM内存溢出问题
-          export GRADLE_OPTS="-Xmx1536m -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError"
-          # 预解析下载所有依赖，加重试，网络波动自动重试
+          # CI环境保守内存配置，彻底避免OOM
+          export GRADLE_OPTS="-Xmx1g -XX:MaxMetaspaceSize=512m"
+          # 预下载所有依赖，不执行构建
           ./gradlew dependencies --no-daemon --stacktrace --warning-mode all
-          echo "✅ 全量依赖预下载完成"
+          echo "项目依赖预下载完成"
+        shell: bash
         timeout-minutes: 15
-        continue-on-error: false # 依赖下载失败必须停止，避免无效构建
 
-      # 8. 生成签名文件，加容错兜底，避免重复生成/目录不存在报错
-      - name: 🔐 生成安卓签名文件
+      # 8. 生成签名文件，容错兜底，避免重复生成报错
+      - name: 生成安卓签名文件
         run: |
           set -euo pipefail
-          # 确保app目录存在
           mkdir -p app
-          # 如果已存在签名文件，跳过生成，避免覆盖
+          # 已存在则跳过，避免覆盖
           if [ -f "${{ env.KEYSTORE_PATH }}" ]; then
-            echo "⚠️  签名文件已存在，跳过生成"
+            echo "签名文件已存在，跳过生成"
             exit 0
           fi
-          
-          # 生成标准安卓调试签名，可直接用于Release构建
+          # 生成标准安卓调试签名
           keytool -genkey -v \
             -keystore ${{ env.KEYSTORE_PATH }} \
             -alias ${{ env.KEYSTORE_ALIAS }} \
@@ -166,27 +177,27 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US" \
             -noprompt
           
-          # 校验签名文件是否生成成功
+          # 校验生成结果
           if [ ! -f "${{ env.KEYSTORE_PATH }}" ]; then
-            echo "❌ 错误：签名文件生成失败"
+            echo "错误：签名文件生成失败"
             exit 1
           fi
-          echo "✅ 签名文件生成完成"
+          echo "签名文件生成完成"
+        shell: bash
         timeout-minutes: 2
 
-      # 9. 自动注入签名配置（核心兜底！解决90%的Release构建签名失败问题）
-      - name: 📝 自动注入构建签名配置
+      # 9. 自动注入签名配置，兼容Groovy/Kotlin两种语法，兜底Release构建失败问题
+      - name: 自动注入构建签名配置
         run: |
           set -euo pipefail
           BUILD_GRADLE_PATH="app/build.gradle"
           BUILD_GRADLE_KTS_PATH="app/build.gradle.kts"
           
-          # 适配Groovy语法的build.gradle
+          # 适配Groovy语法 build.gradle
           if [ -f "$BUILD_GRADLE_PATH" ]; then
-            # 检查是否已有签名配置，没有则注入
             if ! grep -q "signingConfigs" "$BUILD_GRADLE_PATH"; then
-              echo "🔧 注入Groovy语法签名配置"
-              sed -i '/android {/a \
+              echo "注入Groovy语法签名配置"
+              sed -i '/android *{/a \
               signingConfigs {\
                   release {\
                       storeFile file("${{ env.KEYSTORE_PATH }}")\
@@ -203,11 +214,11 @@ jobs:
                   }\
               }' "$BUILD_GRADLE_PATH"
             fi
-          # 适配Kotlin语法的build.gradle.kts
+          # 适配Kotlin语法 build.gradle.kts
           elif [ -f "$BUILD_GRADLE_KTS_PATH" ]; then
             if ! grep -q "signingConfigs" "$BUILD_GRADLE_KTS_PATH"; then
-              echo "🔧 注入Kotlin语法签名配置"
-              sed -i '/android {/a \
+              echo "注入Kotlin语法签名配置"
+              sed -i '/android *{/a \
               signingConfigs {\
                   create("release") {\
                       storeFile = file("${{ env.KEYSTORE_PATH }}")\
@@ -224,65 +235,72 @@ jobs:
                   }\
               }' "$BUILD_GRADLE_KTS_PATH"
             fi
-          else
-            echo "❌ 错误：app/build.gradle 配置文件不存在"
-            exit 1
           fi
-          echo "✅ 签名配置注入完成"
+          echo "签名配置注入完成"
+        shell: bash
         timeout-minutes: 2
 
-      # 10. 同步前端阅读器资源，加容错，不存在不中断构建
-      - name: 📂 同步前端界面资源
+      # 10. 同步前端资源，容错兜底，目录不存在不中断构建
+      - name: 同步前端界面资源
         run: |
           set -euo pipefail
-          # 递归创建assets目录，不存在自动生成
           mkdir -p app/src/main/assets/www
-          
-          # 前端目录存在才同步，不存在给出警告不中断构建
           if [ -d "epub-reader-light" ]; then
             cp -rf epub-reader-light/* app/src/main/assets/www/
-            # 校验同步是否成功
             if [ -z "$(ls -A app/src/main/assets/www/)" ]; then
-              echo "⚠️  警告：前端资源同步后目录为空"
+              echo "警告：前端资源同步后目录为空"
             else
-              echo "✅ 前端资源同步完成，文件清单："
+              echo "前端资源同步完成"
               ls -la app/src/main/assets/www/
             fi
           else
-            echo "⚠️  前端目录epub-reader-light不存在，跳过同步"
+            echo "警告：前端目录epub-reader-light不存在，跳过同步"
           fi
+        shell: bash
         timeout-minutes: 2
 
-      # 11. 构建Release APK，CI环境优化+内存控制+失败重试
-      - name: 🚀 构建Release安装包
+      # 11. 构建Release APK，原生shell重试逻辑，保守内存配置，官方标准命令
+      - name: 构建Release安装包
         run: |
           set -euo pipefail
-          # 最终内存优化，彻底解决OOM问题
-          export GRADLE_OPTS="-Xmx1536m -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError"
-          # 官方标准构建命令，CI环境专属优化参数
-          ./gradlew assembleRelease \
-            --no-daemon \
-            --stacktrace \
-            --warning-mode all \
-            --no-configuration-cache \
-            --no-watch-fs
-          
-          # 校验APK是否生成成功
-          APK_COUNT=$(find app/build/outputs/apk/release -name "*.apk" | wc -l)
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "❌ 错误：构建完成但未生成APK文件"
+          # 保守内存配置，适配CI环境
+          export GRADLE_OPTS="-Xmx1g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError"
+          # 原生重试逻辑，最多重试2次
+          MAX_RETRY=2
+          COUNT=0
+          SUCCESS=0
+          while [ $COUNT -lt $MAX_RETRY ]; do
+            COUNT=$((COUNT+1))
+            echo "第 $COUNT 次构建尝试"
+            if ./gradlew assembleRelease \
+              --no-daemon \
+              --stacktrace \
+              --warning-mode all \
+              --no-configuration-cache \
+              --no-watch-fs; then
+              SUCCESS=1
+              break
+            fi
+            echo "构建失败，等待5秒后重试"
+            sleep 5
+          done
+          # 校验构建结果
+          if [ $SUCCESS -ne 1 ]; then
+            echo "错误：构建失败，已达最大重试次数"
             exit 1
           fi
-          echo "✅ APK构建完成，生成文件："
+          APK_COUNT=$(find app/build/outputs/apk/release -name "*.apk" | wc -l)
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "错误：构建完成但未生成APK文件"
+            exit 1
+          fi
+          echo "APK构建完成，生成文件："
           ls -la app/build/outputs/apk/release/*.apk
+        shell: bash
         timeout-minutes: 20
-        # 偶发失败自动重试1次，解决网络波动/资源竞争问题
-        retry:
-          max-attempts: 2
-          retry-on: error
 
-      # 12. 上传APK产物，保留30天，构建成功必执行
-      - name: 📤 上传Release APK安装包
+      # 12. 上传APK产物，官方标准Action，构建成功必执行
+      - name: 上传Release APK安装包
         uses: actions/upload-artifact@v4
         if: success()
         with:
@@ -291,12 +309,12 @@ jobs:
           retention-days: 30
         timeout-minutes: 5
 
-      # 13. 构建失败全量日志收集，精准定位问题，再也不用猜报错
-      - name: 📋 上传构建失败全量日志
+      # 13. 构建失败全量日志收集，精准定位问题
+      - name: 上传构建失败日志
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: build-failure-full-logs
+          name: build-failure-logs
           path: |
             **/build/reports/
             **/build/outputs/logs/
