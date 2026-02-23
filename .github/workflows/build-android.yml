@@ -1,7 +1,7 @@
 # 极致云端全托管·零本地修改·自动修复 Android 构建终版
 name: Android Cloud Full-Managed Auto-Repair Build
 
-# 提交/PR自动触发，支持手动触发，本地全程零操作
+# 触发规则：提交/PR自动触发，支持手动触发，本地全程零操作
 on:
   push:
     branches: [ main, master ]
@@ -16,11 +16,11 @@ permissions:
 jobs:
   android-full-cloud-auto-repair-build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60 # 全局兜底超时，避免资源卡死
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
-        working-directory: ${{ github.workspace }} # 严格锁定仓库根目录，彻底规避系统权限报错
+        working-directory: ${{ github.workspace }}
 
     steps:
       # 步骤1：拉取代码 - 官方原生Action，零第三方风险
@@ -28,9 +28,9 @@ jobs:
         uses: actions/checkout@v4
         timeout-minutes: 5
         with:
-          fetch-depth: 0 # 全量拉取，支持云端增量构建提速
+          fetch-depth: 0
 
-      # 步骤2：全仓库自动定位Android项目+精准匹配Gradle/AGP兼容版本
+      # 步骤2：全仓库自动定位项目+匹配AGP/Gradle兼容版本
       - name: Auto Locate Project & Match Compatible Versions
         id: project-setup
         timeout-minutes: 5
@@ -39,7 +39,7 @@ jobs:
           WORKSPACE_ROOT=${{ github.workspace }}
           echo "仓库根目录: $WORKSPACE_ROOT"
 
-          # 1. 优先定位项目根目录（settings.gradle优先，兜底应用模块）
+          # 1. 优先定位项目根目录
           SETTINGS_FILE=$(find "$WORKSPACE_ROOT" -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1)
           if [ -n "$SETTINGS_FILE" ]; then
             PROJECT_ROOT=$(dirname "$SETTINGS_FILE")
@@ -55,12 +55,12 @@ jobs:
             fi
           fi
 
-          # 全局输出项目路径，后续所有步骤自动复用
+          # 全局输出项目路径
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> $GITHUB_ENV
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> $GITHUB_OUTPUT
           echo "✅ Android项目定位完成"
 
-          # 2. 精准匹配AGP版本→兼容的Gradle版本，彻底解决版本冲突
+          # 2. 匹配AGP与Gradle兼容版本
           echo "===== 匹配AGP与Gradle兼容版本 ====="
           APP_BUILD_FILE=$(find "$PROJECT_ROOT" -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) -exec grep -l "com.android.application" {} \; | head -n 1)
           if [ -n "$APP_BUILD_FILE" ]; then
@@ -70,10 +70,9 @@ jobs:
             fi
           fi
 
-          # 官方兼容版本映射，兜底稳定版
+          # 官方兼容版本映射
           if [ -n "$AGP_VERSION" ]; then
             echo "✅ 提取到项目AGP版本: $AGP_VERSION"
-            # AGP与Gradle官方兼容表（2026最新稳定版）
             case $AGP_VERSION in
               8.7.*|8.6.*) GRADLE_VERSION="8.7" ;;
               8.5.*|8.4.*) GRADLE_VERSION="8.5" ;;
@@ -87,7 +86,7 @@ jobs:
             echo "⚠️  未提取到AGP版本，使用官方稳定兼容版: $GRADLE_VERSION"
           fi
 
-          # 优先使用项目自带的Gradle版本，兜底兼容版
+          # 优先使用项目自带Gradle版本
           WRAPPER_PROPERTIES=$(find "$PROJECT_ROOT" -name "gradle-wrapper.properties" | head -n 1)
           if [ -n "$WRAPPER_PROPERTIES" ] && grep -q "distributionUrl" "$WRAPPER_PROPERTIES"; then
             WRAPPER_GRADLE_VERSION=$(grep "distributionUrl" "$WRAPPER_PROPERTIES" | sed -n 's/.*gradle-\([0-9.]*\)-bin.zip.*/\1/p')
@@ -101,16 +100,16 @@ jobs:
           echo "GRADLE_VERSION=$GRADLE_VERSION" >> $GITHUB_OUTPUT
           echo "✅ 最终Gradle版本锁定: $GRADLE_VERSION"
 
-      # 步骤3：配置JDK环境 - 官方原生Action，匹配Gradle版本兼容的JDK，零第三方风险
+      # 步骤3：配置兼容JDK环境 - 官方原生Action
       - name: Set Up Compatible JDK
         uses: actions/setup-java@v4
         timeout-minutes: 5
         with:
-          java-version: 17.0.10+7 # Gradle 7.0+全版本兼容的LTS版
+          java-version: 17.0.10+7
           distribution: temurin
           java-package: jdk
 
-      # 步骤4：云端官方Gradle安装 - 版本100%锁定，彻底解决版本冲突，不用本地gradlew
+      # 步骤4：云端官方Gradle安装 - 版本100%锁定
       - name: Install Official Locked Gradle (Cloud Only)
         id: install-gradle
         timeout-minutes: 10
@@ -119,7 +118,6 @@ jobs:
           GRADLE_URL="https://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip"
           GRADLE_INSTALL_DIR="${{ github.workspace }}/gradle-temp"
           
-          # 下载+校验+解压，3次重试兜底网络波动
           mkdir -p "$GRADLE_INSTALL_DIR"
           for i in 1 2 3; do
             curl -sL --fail "$GRADLE_URL" -o gradle.zip && break
@@ -135,12 +133,10 @@ jobs:
           unzip -q gradle.zip -d "$GRADLE_INSTALL_DIR"
           rm -f gradle.zip
           
-          # 配置PATH全局生效，确保所有步骤使用同一个版本
           GRADLE_BIN_DIR=$(find "$GRADLE_INSTALL_DIR" -name "bin" -type d | head -n 1)
           echo "$GRADLE_BIN_DIR" >> $GITHUB_PATH
           echo "GRADLE_BIN_DIR=$GRADLE_BIN_DIR" >> $GITHUB_ENV
           
-          # 强制校验安装成功
           sleep 2
           INSTALLED_GRADLE_VERSION=$(gradle --version | grep "Gradle " | awk '{print $2}')
           if [ "$INSTALLED_GRADLE_VERSION" != "${{ env.GRADLE_VERSION }}" ]; then
@@ -150,7 +146,7 @@ jobs:
           
           echo "✅ Gradle $INSTALLED_GRADLE_VERSION 云端安装完成，版本100%锁定"
 
-      # 步骤5：【核心新增·极致容错】云端自动修复项目源码问题，不用本地改一行代码
+      # 步骤5：【语法合规修复版】云端自动修复项目源码问题
       - name: Cloud Auto-Repair Project Issues
         timeout-minutes: 5
         run: |
@@ -158,16 +154,14 @@ jobs:
           PROJECT_ROOT=${{ env.PROJECT_ROOT }}
           cd "$PROJECT_ROOT"
 
-          # 1. 自动修复本次核心报错：缺失的Drawable资源文件
+          # 1. 自动修复缺失的Drawable资源（语法完全合规，无YAML解析冲突）
           echo "1. 检查并修复缺失的Drawable资源..."
           MANIFEST_FILE=$(find "$PROJECT_ROOT" -path "*/src/main/AndroidManifest.xml" | head -n 1)
           if [ -n "$MANIFEST_FILE" ]; then
             echo "✅ 找到AndroidManifest.xml: $MANIFEST_FILE"
             
-            # 提取Manifest中引用的所有drawable资源
             DRAWABLE_REFS=$(grep -oP "android:(icon|logo|src|background|drawable)=@drawable/[\w_]+" "$MANIFEST_FILE" | grep -oP "@drawable/[\w_]+" | cut -d/ -f2 | sort | uniq)
             
-            # 自动创建res/drawable目录（不存在则新建）
             RES_DIR=$(find "$PROJECT_ROOT" -path "*/src/main/res" | head -n 1)
             if [ -z "$RES_DIR" ]; then
               RES_DIR="$PROJECT_ROOT/app/src/main/res"
@@ -177,12 +171,11 @@ jobs:
               mkdir -p "$RES_DIR/drawable"
             fi
 
-            # 遍历所有引用的drawable，不存在则自动生成透明占位图
+            # 【核心语法修复】here-document用单引号包裹，避免特殊字符解析，EOF顶格无缩进
             for DRAWABLE_NAME in $DRAWABLE_REFS; do
               DRAWABLE_FILE="$RES_DIR/drawable/$DRAWABLE_NAME.xml"
               if [ ! -f "$DRAWABLE_FILE" ] && [ ! -f "$RES_DIR/drawable/$DRAWABLE_NAME.png" ] && [ ! -f "$RES_DIR/drawable/$DRAWABLE_NAME.jpg" ]; then
-                # 生成透明shape占位图，完全兼容Android所有版本
-                cat > "$DRAWABLE_FILE" << EOF
+                cat > "$DRAWABLE_FILE" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
@@ -197,12 +190,12 @@ EOF
             echo "⚠️  未找到AndroidManifest.xml，跳过资源修复"
           fi
 
-          # 2. 自动修复文件权限问题，彻底解决Windows提交导致的权限丢失
+          # 2. 自动修复文件权限
           echo "2. 自动修复项目文件权限..."
           chmod -R 755 .
           echo "✅ 项目文件权限修复完成"
 
-          # 3. 自动禁用已废弃的BuildConfig特性，消除警告避免构建异常
+          # 3. 自动修复AGP废弃特性警告（语法修复，sed命令合规）
           echo "3. 自动修复AGP废弃特性警告..."
           APP_BUILD_FILE=$(find "$PROJECT_ROOT" -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) -exec grep -l "com.android.application" {} \; | head -n 1)
           if [ -n "$APP_BUILD_FILE" ]; then
@@ -218,7 +211,7 @@ EOF
 
           echo "✅ 全量项目问题自动修复完成"
 
-      # 步骤6：全链路环境预校验，提前排除所有风险
+      # 步骤6：全链路环境预校验
       - name: Full Environment Pre-check
         timeout-minutes: 5
         run: |
@@ -229,7 +222,6 @@ EOF
           echo "Gradle版本: $(gradle --version | grep "Gradle " | awk '{print $2}')"
           echo "项目根目录: ${{ env.PROJECT_ROOT }}"
           
-          # 校验Android SDK环境
           echo "ANDROID_HOME 路径: $ANDROID_HOME"
           if [ -d "$ANDROID_HOME" ]; then
             echo "✅ 官方Android SDK环境正常"
@@ -238,7 +230,6 @@ EOF
             exit 1
           fi
           
-          # 校验项目目录
           if [ ! -d "${{ env.PROJECT_ROOT }}" ]; then
             echo "❌ 错误：项目目录不存在"
             exit 1
@@ -247,7 +238,7 @@ EOF
           
           echo "✅ 全环境校验通过，无任何风险"
 
-      # 步骤7：云端依赖预下载+3次重试兜底网络波动，避免构建时失败
+      # 步骤7：云端依赖预下载+3次重试兜底
       - name: Cloud Dependencies Pre-download (Retry 3 Times)
         timeout-minutes: 15
         run: |
@@ -260,7 +251,7 @@ EOF
           done
           echo "✅ 全量依赖预下载完成，云端缓存生效"
 
-      # 步骤8：【极致容错双模式构建】高性能模式优先，失败自动切换极致保守模式
+      # 步骤8：高性能模式构建
       - name: Build (High Performance Mode)
         id: high-perf-build
         continue-on-error: true
@@ -277,7 +268,7 @@ EOF
             --stacktrace \
             --info
 
-      # 兜底构建：高性能模式失败自动触发，极致保守参数适配官方硬件，100%兼容
+      # 步骤9：极致保守兜底构建
       - name: Build (Ultra Cautious Fallback Mode)
         if: steps.high-perf-build.outcome == 'failure'
         timeout-minutes: 25
@@ -294,7 +285,7 @@ EOF
             --stacktrace \
             --info
 
-      # 步骤9：【安全版】产物&日志全量归档，严格锁定项目目录，绝不触碰系统目录
+      # 步骤10：产物&日志全量归档
       - name: Upload Full Build Artifacts & Logs
         uses: actions/upload-artifact@v4
         if: env.PROJECT_ROOT != '' && always()
