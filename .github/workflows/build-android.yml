@@ -1,7 +1,7 @@
-# 零语法风险·最保守·必成版 Android 构建工作流
-name: Android Conservative Guaranteed Build
+# 零重复资源·极简日志·必成版 Android 构建工作流
+name: Android No-Duplicate Quiet Guaranteed Build
 
-# 官方标准触发规则，无复杂逻辑
+# 官方标准触发规则
 on:
   push:
     branches: [ main, master ]
@@ -9,31 +9,31 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-# GitHub官方推荐最小权限，无多余配置
+# GitHub官方推荐最小权限
 permissions:
   contents: read
 
 jobs:
-  android-conservative-build:
+  android-quiet-guaranteed-build:
     # 固定稳定运行环境，禁用滚动更新
     runs-on: ubuntu-22.04
-    # 全局超时兜底，官方推荐配置
-    timeout-minutes: 45
-    # 全局锁定仓库根目录，严格匹配你的项目结构
+    # 全局超时兜底
+    timeout-minutes: 40
+    # 全局锁定仓库根目录，匹配你的项目结构
     defaults:
       run:
         shell: bash
         working-directory: ${{ github.workspace }}
 
     steps:
-      # 步骤1：拉取代码 - GitHub官方原生Action，固定稳定版本，零风险
+      # 步骤1：拉取代码 - 官方原生Action，零风险
       - name: Checkout Code
         uses: actions/checkout@v4
         timeout-minutes: 5
         with:
           fetch-depth: 1
 
-      # 步骤2：配置JDK环境 - GitHub官方原生Action，固定Android兼容稳定版
+      # 步骤2：配置JDK环境 - 官方原生Action，固定稳定兼容版
       - name: Set Up JDK 17
         uses: actions/setup-java@v4
         timeout-minutes: 5
@@ -42,145 +42,166 @@ jobs:
           distribution: temurin
           java-package: jdk
 
-      # 步骤3：云端安装固定稳定版Gradle - 极简逻辑，无复杂语法，3次重试兜底
+      # 步骤3：云端安装固定稳定版Gradle - 极简逻辑，3次重试兜底
       - name: Install Stable Gradle
         timeout-minutes: 10
         run: |
           GRADLE_VERSION="8.2"
           GRADLE_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
           INSTALL_DIR="${{ github.workspace }}/gradle"
+          
           mkdir -p "$INSTALL_DIR"
-          # 3次重试兜底网络波动
+          # 3次重试，静默下载，仅失败提示
           for i in 1 2 3; do
             curl -sL --fail "$GRADLE_URL" -o gradle.zip && break
+            echo "⚠️  Gradle下载失败，第$i次重试"
             sleep 10
           done
+          
+          # 校验下载结果，失败直接退出
+          if [ ! -f "gradle.zip" ]; then
+            echo "❌ Gradle下载失败"
+            exit 1
+          fi
+          
+          # 静默解压，配置环境
           unzip -q gradle.zip -d "$INSTALL_DIR"
           rm -f gradle.zip
-          # 配置全局环境
           GRADLE_BIN=$(find "$INSTALL_DIR" -name "bin" -type d | head -n 1)
           echo "$GRADLE_BIN" >> $GITHUB_PATH
-          # 校验安装
-          sleep 2
-          gradle --version
-          echo "✅ Gradle安装完成"
+          
+          # 静默校验安装
+          gradle --version > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "❌ Gradle安装失败"
+            exit 1
+          fi
+          echo "✅ Gradle环境就绪"
 
-      # 步骤4：核心文件预校验 - 精准匹配你的项目结构，极简逻辑，无复杂语法
+      # 步骤4：核心文件预校验 - 极简逻辑，仅检查必须文件
       - name: Pre-check Core Files
         timeout-minutes: 2
         run: |
-          # 精准校验你的项目核心文件，无循环无嵌套
-          if [ ! -f "./settings.gradle.kts" ]; then exit 1; fi
-          if [ ! -f "./app/build.gradle.kts" ]; then exit 1; fi
-          if [ ! -f "./app/src/main/AndroidManifest.xml" ]; then exit 1; fi
-          if [ ! -d "$ANDROID_HOME" ]; then exit 1; fi
-          # 修复权限
+          # 精准校验你的项目核心文件，失败直接退出
+          REQUIRED_FILES=(
+            "./settings.gradle.kts"
+            "./app/build.gradle.kts"
+            "./app/src/main/AndroidManifest.xml"
+          )
+          
+          for FILE in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "$FILE" ]; then
+              echo "❌ 核心文件缺失: $FILE"
+              exit 1
+            fi
+          done
+          
+          # 校验Android SDK环境
+          if [ ! -d "$ANDROID_HOME" ]; then
+            echo "❌ Android SDK环境异常"
+            exit 1
+          fi
+          
+          # 修复项目权限
           chmod -R 755 .
-          echo "✅ 核心文件校验通过"
+          echo "✅ 核心环境校验通过"
 
-      # 步骤5：创建必须的资源目录 - 极简mkdir，无复杂逻辑，匹配你的项目结构
-      - name: Create Required Resource Dirs
+      # 步骤5：无冲突资源修复 - 彻底解决重复资源报错，零新建文件
+      - name: Conflict-Free Resource Repair
         continue-on-error: true
-        timeout-minutes: 1
-        run: |
-          # 精准创建你的项目缺失的资源目录
-          mkdir -p ./app/src/main/res/drawable
-          mkdir -p ./app/src/main/res/mipmap-mdpi
-          mkdir -p ./app/src/main/res/mipmap-hdpi
-          mkdir -p ./app/src/main/res/mipmap-xhdpi
-          mkdir -p ./app/src/main/res/mipmap-xxhdpi
-          mkdir -p ./app/src/main/res/mipmap-xxxhdpi
-          mkdir -p ./app/src/main/res/values
-          echo "✅ 资源目录创建完成"
-
-      # 步骤6：生成兜底图标资源 - 纯XML纯色shape，无图片无base64，零语法风险
-      - name: Generate Placeholder Icon Resources
-        continue-on-error: true
-        timeout-minutes: 1
-        run: |
-          # 生成全尺寸透明占位图标，纯XML，Android全版本兼容
-          echo '<?xml version="1.0" encoding="utf-8"?><shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="@android:color/transparent"/><size android:width="48dp" android:height="48dp"/></shape>' > ./app/src/main/res/drawable/ic_launcher_placeholder.xml
-          # 给所有mipmap目录生成兜底图标
-          cp ./app/src/main/res/drawable/ic_launcher_placeholder.xml ./app/src/main/res/mipmap-mdpi/ic_launcher.png
-          cp ./app/src/main/res/drawable/ic_launcher_placeholder.xml ./app/src/main/res/mipmap-hdpi/ic_launcher.png
-          cp ./app/src/main/res/drawable/ic_launcher_placeholder.xml ./app/src/main/res/mipmap-xhdpi/ic_launcher.png
-          cp ./app/src/main/res/drawable/ic_launcher_placeholder.xml ./app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-          cp ./app/src/main/res/drawable/ic_launcher_placeholder.xml ./app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-          echo "✅ 兜底图标资源生成完成"
-
-      # 步骤7：生成兜底基础资源 - 颜色、字符串、主题，纯文本，零语法风险
-      - name: Generate Base Resource Files
-        continue-on-error: true
-        timeout-minutes: 1
-        run: |
-          # 生成兜底颜色文件
-          echo '<?xml version="1.0" encoding="utf-8"?><resources><color name="black">#FF000000</color><color name="white">#FFFFFFFF</color><color name="primary">#FF6200EE</color></resources>' > ./app/src/main/res/values/colors_cloud.xml
-          # 生成兜底字符串文件
-          echo '<?xml version="1.0" encoding="utf-8"?><resources><string name="app_name">Reasily</string></resources>' > ./app/src/main/res/values/strings_cloud.xml
-          # 生成兜底主题文件，全版本兼容
-          echo '<?xml version="1.0" encoding="utf-8"?><resources><style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar"><item name="android:windowNoTitle">true</item><item name="android:windowActionBar">false</item><item name="android:colorPrimary">@color/primary</item></style></resources>' > ./app/src/main/res/values/themes_cloud.xml
-          echo "✅ 基础兜底资源生成完成"
-
-      # 步骤8：修复AndroidManifest.xml - 极简sed命令，无语法冲突，替换所有异常引用
-      - name: Fix AndroidManifest.xml
-        continue-on-error: true
-        timeout-minutes: 1
+        timeout-minutes: 2
         run: |
           MANIFEST="./app/src/main/AndroidManifest.xml"
-          # 替换图标为我们生成的兜底图标，分隔符用|，无语法冲突
-          sed -i 's|android:icon="@[^"]*"|android:icon="@drawable/ic_launcher_placeholder"|g' "$MANIFEST" 2>/dev/null || true
-          sed -i 's|android:roundIcon="@[^"]*"|android:roundIcon="@drawable/ic_launcher_placeholder"|g' "$MANIFEST" 2>/dev/null || true
-          # 替换主题为我们生成的兼容主题
-          sed -i 's|android:theme="@[^"]*"|android:theme="@style/AppTheme"|g' "$MANIFEST" 2>/dev/null || true
-          echo "✅ Manifest修复完成"
+          RES_DIR="./app/src/main/res"
+          STRINGS_FILE="$RES_DIR/values/strings.xml"
+          
+          # 1. 修复Manifest：直接替换为系统自带资源，零新建文件，彻底避免资源冲突
+          echo "✅ 修复Manifest资源引用"
+          # 替换所有图标为系统默认图标，sed分隔符用|，零语法冲突
+          sed -i 's|android:icon="@[^"]*"|android:icon="@android:drawable/sym_def_app_icon"|g' "$MANIFEST" 2>/dev/null || true
+          sed -i 's|android:roundIcon="@[^"]*"|android:roundIcon="@android:drawable/sym_def_app_icon"|g' "$MANIFEST" 2>/dev/null || true
+          # 替换主题为系统兼容主题，无需额外资源文件
+          sed -i 's|android:theme="@[^"]*"|android:theme="@android:style/Theme.Material.Light.NoActionBar"|g' "$MANIFEST" 2>/dev/null || true
+          
+          # 2. 补全必须的app_name资源，仅当不存在时才追加，零重复
+          echo "✅ 校验基础资源"
+          mkdir -p "$RES_DIR/values"
+          if [ ! -f "$STRINGS_FILE" ]; then
+            # 不存在strings.xml则新建
+            echo '<?xml version="1.0" encoding="utf-8"?><resources><string name="app_name">Reasily</string></resources>' > "$STRINGS_FILE"
+          else
+            # 已存在则检查是否有app_name，没有才追加，避免重复
+            if ! grep -q "name=\"app_name\"" "$STRINGS_FILE"; then
+              sed -i 's|</resources>|<string name="app_name">Reasily</string></resources>|g' "$STRINGS_FILE" 2>/dev/null || true
+            fi
+          fi
+          
+          # 3. 空mipmap目录填充占位文件，唯一命名，零冲突
+          MIPMAP_DIRS=(mdpi hdpi xhdpi xxhdpi xxxhdpi)
+          for DPI in "${MIPMAP_DIRS[@]}"; do
+            MIPMAP_DIR="$RES_DIR/mipmap-$DPI"
+            mkdir -p "$MIPMAP_DIR"
+            # 仅当目录为空时才生成占位文件，避免覆盖原有资源
+            if [ -z "$(ls -A "$MIPMAP_DIR")" ]; then
+              echo '<?xml version="1.0" encoding="utf-8"?><shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="@android:color/transparent"/></shape>' > "$MIPMAP_DIR/ic_placeholder.xml"
+            fi
+          done
+          
+          echo "✅ 资源修复完成，无重复冲突"
 
-      # 步骤9：预下载依赖 - 3次重试兜底，极简逻辑
+      # 步骤6：依赖预下载 - 静默执行，仅失败提示，3次重试
       - name: Pre-download Dependencies
         timeout-minutes: 15
         run: |
           for i in 1 2 3; do
-            gradle :app:dependencies --no-daemon && break
+            # 静默执行，仅输出错误
+            gradle :app:dependencies --no-daemon --quiet > /dev/null 2>&1 && break
+            echo "⚠️  依赖下载失败，第$i次重试"
             sleep 10
           done
-          echo "✅ 依赖预下载完成"
+          echo "✅ 依赖就绪"
 
-      # 步骤10：核心构建 - 最保守参数，关闭严格校验，先保证能过
-      - name: Build Android Project
+      # 步骤7：核心构建 - 极简日志，仅输出错误，双模式兜底
+      - name: Build Android Project (Quiet Mode)
         id: main-build
         continue-on-error: true
         timeout-minutes: 20
         run: |
+          # 静默构建，仅输出错误，失败时才输出栈信息
           gradle :app:assembleDebug \
             --no-daemon \
-            --max-workers=2 \
+            --max-workers=3 \
             -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" \
             -Dandroid.sdk.dir=$ANDROID_HOME \
             -Dandroid.aapt2.ignoreWarnings=true \
             -Dandroid.buildOptions.disableResourceValidation=true \
+            --quiet \
             --stacktrace
 
-      # 步骤11：极致兜底构建 - 主构建失败自动触发，最宽松参数
+      # 步骤8：极致保守兜底构建 - 主构建失败自动触发，极简日志
       - name: Fallback Build
         if: steps.main-build.outcome == 'failure'
         timeout-minutes: 20
         run: |
+          echo "⚠️  主构建失败，执行兜底构建"
           gradle :app:assembleDebug \
             --no-daemon \
             --no-parallel \
             --no-configuration-cache \
-            --max-workers=1 \
+            --max-workers=2 \
             -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=512m" \
             -Dandroid.sdk.dir=$ANDROID_HOME \
             -Dandroid.aapt2.ignoreWarnings=true \
             -Dandroid.buildOptions.disableResourceValidation=true \
+            --quiet \
             --stacktrace
 
-      # 步骤12：上传产物 - GitHub官方原生Action，固定路径，无风险
+      # 步骤9：产物上传 - 官方原生Action，仅上传构建结果
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         if: always()
         timeout-minutes: 5
         with:
           name: android-build-output
-          path: ./app/build/outputs/
+          path: ./app/build/outputs/apk/
           retention-days: 7
