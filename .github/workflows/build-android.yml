@@ -1,5 +1,5 @@
-# 零重复资源·极简日志·必成版 Android 构建工作流
-name: Android No-Duplicate Quiet Guaranteed Build
+# 缓存加速+错误日志自动打包 Android 构建工作流
+name: Android Cached Build With Error Log Export
 
 # 官方标准触发规则
 on:
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  android-quiet-guaranteed-build:
+  android-cached-log-build:
     # 固定稳定运行环境，禁用滚动更新
     runs-on: ubuntu-22.04
     # 全局超时兜底
@@ -24,6 +24,11 @@ jobs:
       run:
         shell: bash
         working-directory: ${{ github.workspace }}
+    # 全局环境变量，统一配置，方便复用
+    env:
+      GRADLE_VERSION: "8.2"
+      GRADLE_INSTALL_DIR: "${{ github.workspace }}/gradle-stable"
+      BUILD_LOG_FILE: "${{ github.workspace }}/build-error-log.txt" # 错误日志文件路径
 
     steps:
       # 步骤1：拉取代码 - 官方原生Action，零风险
@@ -31,7 +36,7 @@ jobs:
         uses: actions/checkout@v4
         timeout-minutes: 5
         with:
-          fetch-depth: 1
+          fetch-depth: 0 # 全量拉取，支持增量构建缓存
 
       # 步骤2：配置JDK环境 - 官方原生Action，固定稳定兼容版
       - name: Set Up JDK 17
@@ -42,71 +47,123 @@ jobs:
           distribution: temurin
           java-package: jdk
 
-      # 步骤3：云端安装固定稳定版Gradle - 极简逻辑，3次重试兜底
-      - name: Install Stable Gradle
+      # -------------------------- 三级缓存加速模块（官方原生）--------------------------
+      # 缓存1：Gradle分发版 - 固定版本key，永久命中，避免每次重新下载
+      - name: Restore Gradle Distribution Cache
+        uses: actions/cache@v4
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          path: ${{ env.GRADLE_INSTALL_DIR }}
+          key: gradle-distribution-${{ env.GRADLE_VERSION }}
+
+      # 缓存2：Gradle依赖包 - 最大加速点，避免每次重新下载Maven依赖
+      - name: Restore Gradle Dependencies Cache
+        uses: actions/cache@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          path: |
+            ~/.gradle/caches/
+            ~/.gradle/wrapper/
+          key: gradle-dependencies-${{ hashFiles('**/*.gradle.kts', 'gradle.properties', 'settings.gradle.kts') }}
+          restore-keys: |
+            gradle-dependencies-
+
+      # 缓存3：构建产物 - 增量编译，避免每次全量重新编译源码
+      - name: Restore Build Output Cache
+        uses: actions/cache@v4
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          path: |
+            app/build/
+            build/
+          key: gradle-build-output-${{ hashFiles('app/src/**', '**/*.gradle.kts') }}
+          restore-keys: |
+            gradle-build-output-
+      # -----------------------------------------------------------------------------------
+
+      # 步骤3：初始化日志文件 - 无论后续步骤成败，先创建日志文件
+      - name: Initialize Build Log File
+        timeout-minutes: 1
+        run: |
+          # 初始化日志文件，写入构建基础信息
+          echo "===== Android 构建日志 =====" > "$BUILD_LOG_FILE"
+          echo "构建触发时间: $(date "+%Y-%m-%d %H:%M:%S")" >> "$BUILD_LOG_FILE"
+          echo "运行环境: ubuntu-22.04 | Gradle版本: $GRADLE_VERSION" >> "$BUILD_LOG_FILE"
+          echo "==============================" >> "$BUILD_LOG_FILE"
+          echo "" >> "$BUILD_LOG_FILE"
+          echo "✅ 日志文件初始化完成"
+
+      # 步骤4：安装Gradle - 缓存命中则跳过下载，3次重试兜底
+      - name: Install Gradle (Skip if Cached)
         timeout-minutes: 10
         run: |
-          GRADLE_VERSION="8.2"
-          GRADLE_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-          INSTALL_DIR="${{ github.workspace }}/gradle"
-          
-          mkdir -p "$INSTALL_DIR"
-          # 3次重试，静默下载，仅失败提示
-          for i in 1 2 3; do
-            curl -sL --fail "$GRADLE_URL" -o gradle.zip && break
-            echo "⚠️  Gradle下载失败，第$i次重试"
-            sleep 10
-          done
-          
-          # 校验下载结果，失败直接退出
-          if [ ! -f "gradle.zip" ]; then
-            echo "❌ Gradle下载失败"
-            exit 1
+          # 缓存命中则跳过下载
+          if [ -d "${{ env.GRADLE_INSTALL_DIR }}/bin" ] && ${{ env.GRADLE_INSTALL_DIR }}/bin/gradle --version > /dev/null 2>&1; then
+            echo "✅ Gradle缓存命中，跳过下载" | tee -a "$BUILD_LOG_FILE"
+          else
+            echo "⚠️  Gradle缓存未命中，开始下载" | tee -a "$BUILD_LOG_FILE"
+            GRADLE_URL="https://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip"
+            mkdir -p "${{ env.GRADLE_INSTALL_DIR }}"
+            # 3次重试，静默下载
+            for i in 1 2 3; do
+              curl -sL --fail "$GRADLE_URL" -o gradle.zip && break
+              echo "⚠️  Gradle下载失败，第$i次重试" | tee -a "$BUILD_LOG_FILE"
+              sleep 10
+            done
+            # 校验下载结果
+            if [ ! -f "gradle.zip" ]; then
+              echo "❌ Gradle下载失败" | tee -a "$BUILD_LOG_FILE"
+              exit 1
+            fi
+            # 静默解压
+            unzip -q gradle.zip -d "${{ env.GRADLE_INSTALL_DIR }}"
+            rm -f gradle.zip
+            # 统一目录结构
+            GRADLE_BIN=$(find "${{ env.GRADLE_INSTALL_DIR }}" -name "bin" -type d | head -n 1)
+            if [ -z "$GRADLE_BIN" ]; then
+              echo "❌ Gradle解压失败" | tee -a "$BUILD_LOG_FILE"
+              exit 1
+            fi
           fi
-          
-          # 静默解压，配置环境
-          unzip -q gradle.zip -d "$INSTALL_DIR"
-          rm -f gradle.zip
-          GRADLE_BIN=$(find "$INSTALL_DIR" -name "bin" -type d | head -n 1)
+          # 配置全局环境变量
+          GRADLE_BIN=$(find "${{ env.GRADLE_INSTALL_DIR }}" -name "bin" -type d | head -n 1)
           echo "$GRADLE_BIN" >> $GITHUB_PATH
-          
-          # 静默校验安装
+          # 校验安装成功
           gradle --version > /dev/null 2>&1
           if [ $? -ne 0 ]; then
-            echo "❌ Gradle安装失败"
+            echo "❌ Gradle环境配置失败" | tee -a "$BUILD_LOG_FILE"
             exit 1
           fi
-          echo "✅ Gradle环境就绪"
+          echo "✅ Gradle环境就绪" | tee -a "$BUILD_LOG_FILE"
 
-      # 步骤4：核心文件预校验 - 极简逻辑，仅检查必须文件
+      # 步骤5：核心文件预校验 - 极简逻辑，仅检查必须文件
       - name: Pre-check Core Files
         timeout-minutes: 2
         run: |
-          # 精准校验你的项目核心文件，失败直接退出
           REQUIRED_FILES=(
             "./settings.gradle.kts"
             "./app/build.gradle.kts"
             "./app/src/main/AndroidManifest.xml"
           )
-          
           for FILE in "${REQUIRED_FILES[@]}"; do
             if [ ! -f "$FILE" ]; then
-              echo "❌ 核心文件缺失: $FILE"
+              echo "❌ 核心文件缺失: $FILE" | tee -a "$BUILD_LOG_FILE"
               exit 1
             fi
           done
-          
           # 校验Android SDK环境
           if [ ! -d "$ANDROID_HOME" ]; then
-            echo "❌ Android SDK环境异常"
+            echo "❌ Android SDK环境异常" | tee -a "$BUILD_LOG_FILE"
             exit 1
           fi
-          
           # 修复项目权限
           chmod -R 755 .
-          echo "✅ 核心环境校验通过"
+          echo "✅ 核心环境校验通过" | tee -a "$BUILD_LOG_FILE"
 
-      # 步骤5：无冲突资源修复 - 彻底解决重复资源报错，零新建文件
+      # 步骤6：无冲突资源修复 - 彻底解决重复资源/资源缺失报错
       - name: Conflict-Free Resource Repair
         continue-on-error: true
         timeout-minutes: 2
@@ -115,77 +172,91 @@ jobs:
           RES_DIR="./app/src/main/res"
           STRINGS_FILE="$RES_DIR/values/strings.xml"
           
-          # 1. 修复Manifest：直接替换为系统自带资源，零新建文件，彻底避免资源冲突
-          echo "✅ 修复Manifest资源引用"
-          # 替换所有图标为系统默认图标，sed分隔符用|，零语法冲突
+          # 1. 修复Manifest：直接替换为系统自带资源，零新建冲突文件
+          echo "✅ 修复Manifest资源引用" | tee -a "$BUILD_LOG_FILE"
           sed -i 's|android:icon="@[^"]*"|android:icon="@android:drawable/sym_def_app_icon"|g' "$MANIFEST" 2>/dev/null || true
           sed -i 's|android:roundIcon="@[^"]*"|android:roundIcon="@android:drawable/sym_def_app_icon"|g' "$MANIFEST" 2>/dev/null || true
-          # 替换主题为系统兼容主题，无需额外资源文件
           sed -i 's|android:theme="@[^"]*"|android:theme="@android:style/Theme.Material.Light.NoActionBar"|g' "$MANIFEST" 2>/dev/null || true
           
           # 2. 补全必须的app_name资源，仅当不存在时才追加，零重复
-          echo "✅ 校验基础资源"
+          echo "✅ 校验基础资源" | tee -a "$BUILD_LOG_FILE"
           mkdir -p "$RES_DIR/values"
           if [ ! -f "$STRINGS_FILE" ]; then
-            # 不存在strings.xml则新建
             echo '<?xml version="1.0" encoding="utf-8"?><resources><string name="app_name">Reasily</string></resources>' > "$STRINGS_FILE"
           else
-            # 已存在则检查是否有app_name，没有才追加，避免重复
             if ! grep -q "name=\"app_name\"" "$STRINGS_FILE"; then
               sed -i 's|</resources>|<string name="app_name">Reasily</string></resources>|g' "$STRINGS_FILE" 2>/dev/null || true
             fi
           fi
           
-          # 3. 空mipmap目录填充占位文件，唯一命名，零冲突
+          # 3. 空mipmap目录填充占位文件，仅空目录执行，零冲突
           MIPMAP_DIRS=(mdpi hdpi xhdpi xxhdpi xxxhdpi)
           for DPI in "${MIPMAP_DIRS[@]}"; do
             MIPMAP_DIR="$RES_DIR/mipmap-$DPI"
             mkdir -p "$MIPMAP_DIR"
-            # 仅当目录为空时才生成占位文件，避免覆盖原有资源
             if [ -z "$(ls -A "$MIPMAP_DIR")" ]; then
               echo '<?xml version="1.0" encoding="utf-8"?><shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="@android:color/transparent"/></shape>' > "$MIPMAP_DIR/ic_placeholder.xml"
             fi
           done
           
-          echo "✅ 资源修复完成，无重复冲突"
+          echo "✅ 资源修复完成，无重复冲突" | tee -a "$BUILD_LOG_FILE"
 
-      # 步骤6：依赖预下载 - 静默执行，仅失败提示，3次重试
-      - name: Pre-download Dependencies
-        timeout-minutes: 15
+      # 步骤7：依赖预校验 - 静默执行，仅失败提示，复用缓存依赖
+      - name: Pre-check Dependencies
+        timeout-minutes: 10
         run: |
           for i in 1 2 3; do
-            # 静默执行，仅输出错误
             gradle :app:dependencies --no-daemon --quiet > /dev/null 2>&1 && break
-            echo "⚠️  依赖下载失败，第$i次重试"
+            echo "⚠️  依赖校验失败，第$i次重试" | tee -a "$BUILD_LOG_FILE"
             sleep 10
           done
-          echo "✅ 依赖就绪"
+          echo "✅ 依赖就绪" | tee -a "$BUILD_LOG_FILE"
 
-      # 步骤7：核心构建 - 极简日志，仅输出错误，双模式兜底
-      - name: Build Android Project (Quiet Mode)
+      # 步骤8：核心构建 - 开启构建缓存，全量日志捕获，双模式兜底
+      - name: Build Android Project (Cached Quiet Mode)
         id: main-build
         continue-on-error: true
         timeout-minutes: 20
         run: |
-          # 静默构建，仅输出错误，失败时才输出栈信息
+          echo "" >> "$BUILD_LOG_FILE"
+          echo "===== 主构建执行日志 =====" >> "$BUILD_LOG_FILE"
+          # 构建命令：tee同时输出到控制台和日志文件，完整捕获所有报错
           gradle :app:assembleDebug \
             --no-daemon \
+            --build-cache \
             --max-workers=3 \
             -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" \
             -Dandroid.sdk.dir=$ANDROID_HOME \
             -Dandroid.aapt2.ignoreWarnings=true \
             -Dandroid.buildOptions.disableResourceValidation=true \
             --quiet \
-            --stacktrace
+            --stacktrace 2>&1 | tee -a "$BUILD_LOG_FILE"
+          
+          # 记录构建结果
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "" >> "$BUILD_LOG_FILE"
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ 主构建执行成功" | tee -a "$BUILD_LOG_FILE"
+            echo "BUILD_STATUS=success" >> $GITHUB_ENV
+          else
+            echo "❌ 主构建执行失败，退出码: $EXIT_CODE" | tee -a "$BUILD_LOG_FILE"
+            echo "BUILD_STATUS=failure" >> $GITHUB_ENV
+            exit $EXIT_CODE
+          fi
 
-      # 步骤8：极致保守兜底构建 - 主构建失败自动触发，极简日志
+      # 步骤9：极致保守兜底构建 - 主构建失败自动触发，完整捕获日志
       - name: Fallback Build
         if: steps.main-build.outcome == 'failure'
         timeout-minutes: 20
         run: |
-          echo "⚠️  主构建失败，执行兜底构建"
+          echo "" >> "$BUILD_LOG_FILE"
+          echo "===== 兜底构建执行日志 =====" >> "$BUILD_LOG_FILE"
+          echo "⚠️  主构建失败，执行兜底构建" | tee -a "$BUILD_LOG_FILE"
+          
+          # 兜底构建命令，完整捕获日志
           gradle :app:assembleDebug \
             --no-daemon \
+            --build-cache \
             --no-parallel \
             --no-configuration-cache \
             --max-workers=2 \
@@ -194,14 +265,40 @@ jobs:
             -Dandroid.aapt2.ignoreWarnings=true \
             -Dandroid.buildOptions.disableResourceValidation=true \
             --quiet \
-            --stacktrace
+            --stacktrace 2>&1 | tee -a "$BUILD_LOG_FILE"
+          
+          # 记录兜底构建结果
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "" >> "$BUILD_LOG_FILE"
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ 兜底构建执行成功" | tee -a "$BUILD_LOG_FILE"
+            echo "BUILD_STATUS=success" >> $GITHUB_ENV
+          else
+            echo "❌ 兜底构建执行失败，退出码: $EXIT_CODE" | tee -a "$BUILD_LOG_FILE"
+            echo "BUILD_STATUS=failure" >> $GITHUB_ENV
+            exit $EXIT_CODE
+          fi
 
-      # 步骤9：产物上传 - 官方原生Action，仅上传构建结果
-      - name: Upload Build Artifacts
+      # 步骤10：最终日志收尾 - 补充构建最终状态
+      - name: Finalize Build Log
+        if: always()
+        timeout-minutes: 1
+        run: |
+          echo "" >> "$BUILD_LOG_FILE"
+          echo "==============================" >> "$BUILD_LOG_FILE"
+          echo "构建最终状态: ${{ env.BUILD_STATUS || 'unknown' }}" >> "$BUILD_LOG_FILE"
+          echo "构建完成时间: $(date "+%Y-%m-%d %H:%M:%S")" >> "$BUILD_LOG_FILE"
+          echo "==============================" >> "$BUILD_LOG_FILE"
+          echo "✅ 日志文件已生成，路径: $BUILD_LOG_FILE"
+
+      # 步骤11：产物&日志上传 - 同时打包APK和错误日志，供下载
+      - name: Upload Build APK & Error Log
         uses: actions/upload-artifact@v4
         if: always()
         timeout-minutes: 5
         with:
-          name: android-build-output
-          path: ./app/build/outputs/apk/
-          retention-days: 7
+          name: android-build-output-with-log
+          path: |
+            app/build/outputs/apk/
+            ${{ env.BUILD_LOG_FILE }}
+          retention-days: 15
